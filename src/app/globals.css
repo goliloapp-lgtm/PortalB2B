@@ -1,26 +1,64 @@
 @import "tailwindcss";
 
+@theme {
+  --font-sans: var(--font-plus-jakarta), system-ui, -apple-system, sans-serif;
+  --color-primary: #5D87FF;
+  --color-primary-hover: #4570EA;
+  --color-primary-light: #ECF2FF;
+  --color-secondary: #49BEFF;
+  --color-secondary-light: #E8F7FF;
+  --color-success: #13DEB9;
+  --color-success-light: #E6FFFA;
+  --color-warning: #FFAE1F;
+  --color-warning-light: #FEF5E5;
+  --color-error: #FA896B;
+  --color-error-light: #FDEDE8;
+  --color-dark: #2A3547;
+  --color-muted: #5A6A85;
+  --color-subtle: #7C8FAC;
+  --color-light-bg: #F2F6FA;
+  --color-border-card: #E5EAEF;
+}
+
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
-
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+  --background: #F2F6FA;
+  --foreground: #2A3547;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background-color: #F2F6FA;
+  color: #2A3547;
+  font-family: var(--font-plus-jakarta), sans-serif;
+}
+
+/* Card base style matching MUI Modernize */
+.modern-card {
+  background-color: #FFFFFF;
+  border: 1px solid #E5EAEF;
+  border-radius: 7px;
+  box-shadow: 0px 0px 2px 0px rgba(145, 158, 171, 0.3), 0px 12px 24px -4px rgba(145, 158, 171, 0.12);
+}
+
+.modern-btn-primary {
+  background-color: #5D87FF;
+  color: #FFFFFF;
+  border-radius: 7px;
+  font-weight: 500;
+  transition: all 0.2s ease;
+}
+.modern-btn-primary:hover {
+  background-color: #4570EA;
+}
+
+.modern-input {
+  border: 1px solid #E5EAEF;
+  border-radius: 7px;
+  color: #2A3547;
+  font-size: 0.875rem;
+  transition: all 0.2s ease;
+}
+.modern-input:focus {
+  outline: none;
+  border-color: #5D87FF;
+  box-shadow: 0 0 0 3px rgba(93, 135, 255, 0.15);
 }
