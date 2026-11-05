@@ -12,6 +12,14 @@ import {
 } from "firebase/firestore";
 import {
   createTripCallable,
+  createScheduledTripCallable,
+  createTravellerCallable,
+  listCostCentresCallable,
+  listTravellersCallable,
+  listCompanyRatesCallable,
+  listVehicleTypesCallable,
+  CompanyRateRow,
+  VehicleTypeSummary,
   getFareQuoteCallable,
   GetFareQuoteResponse,
   db,
@@ -38,7 +46,11 @@ import {
   calculateRoadDistanceKm,
   calculateMultiStopRouteDistanceKm,
   getAllowedCategoriesForPassengers,
+  B2B_RESERVATION_CONFIG,
+  CAPACITY_EXCEEDED_MESSAGE_ES,
 } from "@/lib/b2bPricing";
+import GoogleAddressAutocomplete from "@/components/maps/GoogleAddressAutocomplete";
+import GoogleRouteMap from "@/components/maps/GoogleRouteMap";
 import { useLanguage } from "@/context/LanguageContext";
 import {
   ArrowLeft,
@@ -49,7 +61,17 @@ import {
   AlertTriangle,
   Globe,
   PhoneCall,
+  Clock,
+  MapPin,
+  Building,
+  ChevronDown,
 } from "lucide-react";
+
+export const getMinReservationDateTime = (hours = B2B_RESERVATION_CONFIG.minAdvanceHours) => {
+  const target = new Date(Date.now() + hours * 60 * 60 * 1000);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${target.getFullYear()}-${pad(target.getMonth() + 1)}-${pad(target.getDate())}T${pad(target.getHours())}:${pad(target.getMinutes())}`;
+};
 
 export default function NuevaSolicitudPortalB2BPage() {
   const router = useRouter();
@@ -70,23 +92,42 @@ export default function NuevaSolicitudPortalB2BPage() {
   const [hasCargo, setHasCargo] = useState(false);
   const [cargoDescription, setCargoDescription] = useState("");
   const [roundTrip, setRoundTrip] = useState(false);
-  const [isImmediate, setIsImmediate] = useState(true);
-  const [scheduledDateTime, setScheduledDateTime] = useState(() => {
-    const d = new Date(Date.now() + 60 * 60 * 1000);
-    return d.toISOString().slice(0, 16);
-  });
+  const [advanceHours, setAdvanceHours] = useState<number>(B2B_RESERVATION_CONFIG.minAdvanceHours);
+  const [isImmediate, setIsImmediate] = useState(B2B_RESERVATION_CONFIG.allowImmediate);
+  const [scheduledDateTime, setScheduledDateTime] = useState(() =>
+    getMinReservationDateTime(B2B_RESERVATION_CONFIG.minAdvanceHours)
+  );
 
   const [originIndex, setOriginIndex] = useState<number>(0);
-  const [originAddress, setOriginAddress] = useState(
-    EL_SALVADOR_LOCATIONS[0].address
-  );
+  const [originCoord, setOriginCoord] = useState<{
+    lat: number;
+    lng: number;
+    address: string;
+  }>({
+    lat: EL_SALVADOR_LOCATIONS[0].lat,
+    lng: EL_SALVADOR_LOCATIONS[0].lng,
+    address: EL_SALVADOR_LOCATIONS[0].address,
+  });
+
   const [destinationIndex, setDestinationIndex] = useState<number>(10);
-  const [destinationAddress, setDestinationAddress] = useState(
-    EL_SALVADOR_LOCATIONS[10].address
-  );
+  const [destinationCoord, setDestinationCoord] = useState<{
+    lat: number;
+    lng: number;
+    address: string;
+  }>({
+    lat: EL_SALVADOR_LOCATIONS[10].lat,
+    lng: EL_SALVADOR_LOCATIONS[10].lng,
+    address: EL_SALVADOR_LOCATIONS[10].address,
+  });
+
   const [stops, setStops] = useState<
-    Array<{ presetIndex: number; address: string }>
+    Array<{ presetIndex: number; address: string; lat: number; lng: number }>
   >([]);
+  const [googleDistanceKm, setGoogleDistanceKm] = useState<number | null>(null);
+  const [googleDurationMinutes, setGoogleDurationMinutes] = useState<number | null>(null);
+  const [openOriginHubs, setOpenOriginHubs] = useState(false);
+  const [openDestHubs, setOpenDestHubs] = useState(false);
+  const [openStopHubsIdx, setOpenStopHubsIdx] = useState<number | null>(null);
   const [notes, setNotes] = useState("");
 
   const [submitting, setSubmitting] = useState(false);
@@ -109,6 +150,8 @@ export default function NuevaSolicitudPortalB2BPage() {
   const [serverQuote, setServerQuote] = useState<
     GetFareQuoteResponse["quote"] | null
   >(null);
+  const [companyRates, setCompanyRates] = useState<CompanyRateRow[]>([]);
+  const [vehicleTypes, setVehicleTypes] = useState<VehicleTypeSummary[]>([]);
 
   useEffect(() => {
     if (!loading && !user) {
@@ -117,6 +160,44 @@ export default function NuevaSolicitudPortalB2BPage() {
       router.push("/");
     }
   }, [user, loading, mustChangePassword, router]);
+
+  // Sincronizar restricciones de la empresa (allowsImmediateTrips, minimumBookingLeadMinutes)
+  useEffect(() => {
+    if (!company) return;
+    const minLeadMins =
+      typeof company.minimumBookingLeadMinutes === "number" &&
+      company.minimumBookingLeadMinutes >= 0
+        ? company.minimumBookingLeadMinutes
+        : B2B_RESERVATION_CONFIG.minAdvanceHours * 60;
+    const minHours = Math.max(1, Math.ceil(minLeadMins / 60));
+    setAdvanceHours(minHours);
+    setScheduledDateTime(getMinReservationDateTime(minHours));
+    if (company.allowsImmediateTrips !== true) {
+      setIsImmediate(false);
+    }
+  }, [company?.id, company?.minimumBookingLeadMinutes, company?.allowsImmediateTrips]);
+
+  // Cargar catálogo de tipos de vehículo B2B (listVehicleTypes) y tarifas de empresa (CF-45)
+  useEffect(() => {
+    if (!user) return;
+    listVehicleTypesCallable({ b2bSuitable: true })
+      .then((res) => {
+        if (Array.isArray(res.data?.types)) {
+          setVehicleTypes(res.data.types);
+        }
+      })
+      .catch(() => {});
+
+    if (isCompanyAdmin) {
+      listCompanyRatesCallable()
+        .then((res) => {
+          if (Array.isArray(res.data?.rates)) {
+            setCompanyRates(res.data.rates);
+          }
+        })
+        .catch(() => {});
+    }
+  }, [user, isCompanyAdmin]);
 
   useEffect(() => {
     getDoc(doc(db, "countries", "sv"))
@@ -151,6 +232,57 @@ export default function NuevaSolicitudPortalB2BPage() {
   useEffect(() => {
     if (!company?.id) return;
     const targetCountryId = String(company.countryId || "sv").toLowerCase();
+
+    // CF-46 / CF-47: cargar por callables cuando es company_admin
+    if (isCompanyAdmin) {
+      listCostCentresCallable()
+        .then((res) => {
+          if (Array.isArray(res.data?.costCentres) && res.data.costCentres.length > 0) {
+            const mapped: CostCenter[] = res.data.costCentres
+              .filter((c) => c.active !== false)
+              .map((c) => ({
+                id: c.costCentreId,
+                name: c.name,
+                department: c.name,
+                budgetLimit: c.budgetLimit ?? null,
+                spent: c.spent ?? 0,
+                reserved: c.reserved ?? 0,
+                status: c.active ? "active" : "inactive",
+              }));
+            setCostCenters(mapped);
+            if (mapped.length > 0) {
+              setCostCenterId((prev) =>
+                prev && mapped.some((c) => c.id === prev) ? prev : mapped[0].id
+              );
+            }
+          }
+        })
+        .catch(() => {});
+
+      listTravellersCallable()
+        .then((res) => {
+          if (Array.isArray(res.data?.travellers) && res.data.travellers.length > 0) {
+            const mapped: B2BTraveller[] = res.data.travellers
+              .filter((t) => t.active !== false)
+              .map((t) => ({
+                id: t.travellerId,
+                companyId: company.id,
+                name: t.name,
+                fullName: t.name,
+                phone: t.phone || "+503 0000-0000",
+                email: t.email,
+                active: t.active,
+                status: t.active ? "active" : "inactive",
+              }));
+            setTravellers(mapped);
+            if (mapped.length > 0) {
+              setTravellerId((prev) => prev || mapped[0].id);
+            }
+          }
+        })
+        .catch(() => {});
+    }
+
     const unsubCC = onSnapshot(
       collection(
         db,
@@ -161,9 +293,9 @@ export default function NuevaSolicitudPortalB2BPage() {
         "costCenters"
       ),
       (snap) => {
-        const list = snap.docs.map(
-          (d) => ({ id: d.id, ...d.data() } as CostCenter)
-        );
+        const list = snap.docs
+          .map((d) => ({ id: d.id, ...d.data() } as CostCenter))
+          .filter((c: any) => c.active !== false && c.status !== "inactive");
         setCostCenters(list);
         if (list.length > 0) {
           setCostCenterId((prev) =>
@@ -209,7 +341,7 @@ export default function NuevaSolicitudPortalB2BPage() {
       unsubCC();
       unsubTrav();
     };
-  }, [company?.id, company?.countryId]);
+  }, [company?.id, company?.countryId, isCompanyAdmin]);
 
   const allowedCategories = useMemo(
     () => getAllowedCategoriesForPassengers(passengersCount),
@@ -223,25 +355,23 @@ export default function NuevaSolicitudPortalB2BPage() {
   }, [allowedCategories, vehicleCategory]);
 
   const oneWayDistanceKm = useMemo(() => {
-    const o = EL_SALVADOR_LOCATIONS[originIndex] || EL_SALVADOR_LOCATIONS[0];
-    const d =
-      EL_SALVADOR_LOCATIONS[destinationIndex] || EL_SALVADOR_LOCATIONS[1];
+    if (googleDistanceKm && googleDistanceKm > 0) {
+      return roundTrip ? Number((googleDistanceKm / 2).toFixed(1)) : googleDistanceKm;
+    }
     const pts = [
-      { lat: o.lat, lng: o.lng },
-      ...stops.map((s) => {
-        const p =
-          EL_SALVADOR_LOCATIONS[s.presetIndex] || EL_SALVADOR_LOCATIONS[2];
-        return { lat: p.lat, lng: p.lng };
-      }),
-      { lat: d.lat, lng: d.lng },
+      { lat: originCoord.lat, lng: originCoord.lng },
+      ...stops.map((s) => ({ lat: s.lat, lng: s.lng })),
+      { lat: destinationCoord.lat, lng: destinationCoord.lng },
     ];
     return calculateMultiStopRouteDistanceKm(pts);
-  }, [originIndex, destinationIndex, stops]);
+  }, [googleDistanceKm, roundTrip, originCoord, destinationCoord, stops]);
 
   const negotiatedRate = useMemo(() => {
+    const suvRate = companyRates.find((r) => r.categoryId === "suv")?.fareRate;
+    if (typeof suvRate === "number" && suvRate > 0) return suvRate;
     const raw = Number(company?.negotiatedFareRate);
     return Number.isFinite(raw) && raw > 0 ? raw : SV_DEFAULT_NEGOTIATED_RATE;
-  }, [company?.negotiatedFareRate]);
+  }, [company?.negotiatedFareRate, companyRates]);
 
   const tariff = useMemo(
     () =>
@@ -263,20 +393,13 @@ export default function NuevaSolicitudPortalB2BPage() {
 
   // Construir tramos (legs) reales a partir de los puntos de la ruta
   const routeLegs = useMemo<TripLegInput[]>(() => {
-    const o = EL_SALVADOR_LOCATIONS[originIndex] || EL_SALVADOR_LOCATIONS[0];
-    const d =
-      EL_SALVADOR_LOCATIONS[destinationIndex] || EL_SALVADOR_LOCATIONS[1];
     const waypoints = [
-      { lat: o.lat, lng: o.lng },
-      ...stops.map((s) => {
-        const p =
-          EL_SALVADOR_LOCATIONS[s.presetIndex] || EL_SALVADOR_LOCATIONS[2];
-        return { lat: p.lat, lng: p.lng };
-      }),
-      { lat: d.lat, lng: d.lng },
+      { lat: originCoord.lat, lng: originCoord.lng },
+      ...stops.map((s) => ({ lat: s.lat, lng: s.lng })),
+      { lat: destinationCoord.lat, lng: destinationCoord.lng },
     ];
     if (roundTrip) {
-      waypoints.push({ lat: o.lat, lng: o.lng });
+      waypoints.push({ lat: originCoord.lat, lng: originCoord.lng });
     }
     const builtLegs: TripLegInput[] = [];
     for (let i = 0; i < waypoints.length - 1; i++) {
@@ -297,17 +420,20 @@ export default function NuevaSolicitudPortalB2BPage() {
             durationMinutes: tariff.estimatedDurationMinutes,
           },
         ];
-  }, [originIndex, destinationIndex, stops, roundTrip, tariff.chargedDistanceKm, tariff.estimatedDurationMinutes]);
+  }, [originCoord, destinationCoord, stops, roundTrip, tariff.chargedDistanceKm, tariff.estimatedDurationMinutes]);
 
-  const backendCategoryId = useMemo(
-    () =>
-      vehicleCategory === "pickup"
-        ? "pickup-doble-cabina"
-        : vehicleCategory === "microbus"
-        ? "microbus"
-        : "suv",
-    [vehicleCategory]
-  );
+  const backendCategoryId = useMemo(() => {
+    if (vehicleCategory === "pickup") {
+      const hasPickupSimple = vehicleTypes.some((t) => t.id === "pickup");
+      return hasPickupSimple ? "pickup" : "pickup-doble-cabina";
+    }
+    if (vehicleCategory === "microbus") {
+      const hasVan = vehicleTypes.some((t) => t.id === "van");
+      const hasMicrobus = vehicleTypes.some((t) => t.id === "microbus");
+      return hasMicrobus ? "microbus" : hasVan ? "van" : "microbus";
+    }
+    return "suv";
+  }, [vehicleCategory, vehicleTypes]);
 
   // Consultar cotización oficial en el backend (getFareQuote — CF-38)
   useEffect(() => {
@@ -320,7 +446,7 @@ export default function NuevaSolicitudPortalB2BPage() {
         }
       })
       .catch(() => {
-        // Fallback sin categoryId en caso de que la categoría no tenga fila en fareRates
+        // Fallback sin categoryId en caso de que la categoría específica no tenga fila en fareRates
         getFareQuoteCallable({ legs: routeLegs })
           .then((res) => {
             if (active && res.data?.quote) {
@@ -349,6 +475,12 @@ export default function NuevaSolicitudPortalB2BPage() {
   const effectiveTaxLabel = serverQuote?.taxLabel ?? tariff.taxLabel;
   const effectiveTaxAmount = serverQuote?.taxAmount ?? tariff.taxAmount;
   const effectiveTotalAmount = serverQuote?.totalAmount ?? tariff.totalAmount;
+  const effectiveRateSourceLabel =
+    serverQuote?.rateSource === "negotiated"
+      ? "Tarifa negociada"
+      : serverQuote
+        ? "Precio de país"
+        : "Tarifa B2B";
 
   const handleAddStop = () => {
     setStops((prev) => [
@@ -356,6 +488,8 @@ export default function NuevaSolicitudPortalB2BPage() {
       {
         presetIndex: 3,
         address: EL_SALVADOR_LOCATIONS[3].address,
+        lat: EL_SALVADOR_LOCATIONS[3].lat,
+        lng: EL_SALVADOR_LOCATIONS[3].lng,
       },
     ]);
   };
@@ -365,12 +499,25 @@ export default function NuevaSolicitudPortalB2BPage() {
     if (passengersCount > MAX_VEHICLE_PASSENGER_CAPACITY) {
       setError(
         isEn
-          ? `Requested capacity (${passengersCount} passengers) exceeds maximum vehicle limit (${MAX_VEHICLE_PASSENGER_CAPACITY} passengers). Please contact Lilo directly at ${LILO_DIRECT_CONTACT.whatsapp} or ${LILO_DIRECT_CONTACT.email}.`
-          : `La capacidad solicitada (${passengersCount} pasajeros) excede el límite máximo de los vehículos (${MAX_VEHICLE_PASSENGER_CAPACITY} pasajeros). Por favor comunícate con Lilo al ${LILO_DIRECT_CONTACT.whatsapp} o ${LILO_DIRECT_CONTACT.email}.`
+          ? "For trips with more than 12 passengers, please contact us by WhatsApp or phone and we will gladly assist you immediately.\nWe are at your service."
+          : "Para viajes de más de 12 pasajeros, contáctenos por WhatsApp o llamada y con gusto le ayudaremos de inmediato.\nEstamos para servirle."
       );
       return;
     }
-    if (!originAddress.trim() || !destinationAddress.trim()) {
+    if (!isImmediate) {
+      const scheduledMs = new Date(scheduledDateTime).getTime();
+      const minRequiredMs =
+        Date.now() + advanceHours * 60 * 60 * 1000 - 60000;
+      if (isNaN(scheduledMs) || scheduledMs < minRequiredMs) {
+        setError(
+          isEn
+            ? `Reservations must be booked at least ${advanceHours} hours in advance.`
+            : `Las reservas de viaje deben programarse con un mínimo de ${advanceHours} horas de anticipación.`
+        );
+        return;
+      }
+    }
+    if (!originCoord.address.trim() || !destinationCoord.address.trim()) {
       setError("Completa la dirección de origen y destino.");
       return;
     }
@@ -378,38 +525,34 @@ export default function NuevaSolicitudPortalB2BPage() {
     setSubmitting(true);
     setError(null);
     try {
-      const o = EL_SALVADOR_LOCATIONS[originIndex] || EL_SALVADOR_LOCATIONS[0];
-      const d =
-        EL_SALVADOR_LOCATIONS[destinationIndex] || EL_SALVADOR_LOCATIONS[1];
-
       const originPoint: RoutePoint = {
-        address: originAddress.trim(),
-        lat: o.lat,
-        lng: o.lng,
+        address: originCoord.address.trim(),
+        lat: originCoord.lat,
+        lng: originCoord.lng,
       };
       const destPoint: RoutePoint = {
-        address: destinationAddress.trim(),
-        lat: d.lat,
-        lng: d.lng,
+        address: destinationCoord.address.trim(),
+        lat: destinationCoord.lat,
+        lng: destinationCoord.lng,
       };
-      const stopPoints: RoutePoint[] = stops.map((s) => {
-        const p =
-          EL_SALVADOR_LOCATIONS[s.presetIndex] || EL_SALVADOR_LOCATIONS[2];
-        return {
-          address: s.address.trim(),
-          lat: p.lat,
-          lng: p.lng,
-        };
-      });
+      const stopPoints: RoutePoint[] = stops.map((s) => ({
+        address: s.address.trim(),
+        lat: s.lat,
+        lng: s.lng,
+      }));
 
+      if (costCenters.length > 1 && !costCenterId) {
+        throw new Error(
+          `La empresa tiene ${costCenters.length} centros de costo activos. Debes seleccionar uno obligatoriamente.`
+        );
+      }
       const selectedCC =
         costCenters.find((c) => c.id === costCenterId) || costCenters[0];
       let resolvedTraveller =
         travellers.find((t) => t.id === travellerId) || travellers[0];
 
-      // Si la empresa aún no tiene un viajero registrado en countries/{countryId}/b2bCompanies/{companyId}/travellers
+      // CF-47: Si no hay viajero registrado, crearlo vía createTravellerCallable (la escritura directa a travellers está cerrada)
       if (!resolvedTraveller && company?.id) {
-        const targetCountryId = String(company.countryId || "sv").toLowerCase();
         const manualName =
           passengerNamesInput
             .split(",")
@@ -417,44 +560,29 @@ export default function NuevaSolicitudPortalB2BPage() {
             .filter(Boolean)[0] ||
           company.contactName ||
           "Viajero Corporativo";
+        const manualPhone =
+          passengerPhone.trim() || company.phone || "+503 7000-0000";
         try {
-          const newTravRef = await addDoc(
-            collection(
-              db,
-              "countries",
-              targetCountryId,
-              "b2bCompanies",
-              company.id,
-              "travellers"
-            ),
-            {
-              companyId: company.id,
-              name: manualName,
-              fullName: manualName,
-              phone: passengerPhone.trim() || company.phone || "+503 0000-0000",
-              department: selectedCC?.department || "General",
-              costCenterId: selectedCC?.id || null,
-              active: true,
-              status: "active",
-              createdAt: serverTimestamp(),
-            }
-          );
+          const createdTrav = await createTravellerCallable({
+            name: manualName,
+            phone: manualPhone,
+          });
           resolvedTraveller = {
-            id: newTravRef.id,
+            id: createdTrav.data.travellerId,
             companyId: company.id,
             fullName: manualName,
-            phone: passengerPhone.trim() || company.phone || "+503 0000-0000",
+            phone: manualPhone,
             active: true,
           };
-        } catch {
-          resolvedTraveller = {
-            id: "travDemo001",
-            companyId: company.id,
-            fullName: manualName,
-            phone: passengerPhone.trim() || company.phone || "+503 0000-0000",
-            active: true,
-          };
+        } catch (travErr) {
+          console.warn("[PortalB2B] createTravellerCallable warning:", travErr);
         }
+      }
+
+      if (!resolvedTraveller?.id) {
+        throw new Error(
+          "Selecciona un viajero corporativo registrado o pide al Administrador de Empresa dar de alta uno en la pestaña Viajeros."
+        );
       }
 
       const folio = `B2B-SV-${new Date().getFullYear()}-${Math.floor(
@@ -464,29 +592,59 @@ export default function NuevaSolicitudPortalB2BPage() {
       const legs = routeLegs;
       const totalRideTimeMinutes = Math.max(
         1,
-        legs.reduce((acc, l) => acc + Math.round(l.durationMinutes), 0)
+        googleDurationMinutes && googleDurationMinutes > 0
+          ? Math.round(googleDurationMinutes)
+          : legs.reduce((acc, l) => acc + Math.round(l.durationMinutes), 0)
       );
 
       let createdTripId: string | undefined;
+      let createdScheduledTripId: string | undefined;
       let serverFareBreakdown: any;
+
       try {
-        const res = await createTripCallable<
-          any,
-          { tripId: string; fareBreakdown?: any }
-        >({
-          originAddress: originPoint.address,
-          originLatitude: originPoint.lat,
-          originLongitude: originPoint.lng,
-          destinationAddress: destPoint.address,
-          destinationLatitude: destPoint.lat,
-          destinationLongitude: destPoint.lng,
-          rideTimeMinutes: totalRideTimeMinutes,
-          travellerId: resolvedTraveller?.id || "travDemo001",
-          categoryId: backendCategoryId,
-          legs,
-        });
-        createdTripId = res.data?.tripId;
-        serverFareBreakdown = res.data?.fareBreakdown;
+        if (!isImmediate) {
+          // CF-48: Reserva programada B2B via createScheduledTripCallable
+          // NO se envían categoryId, companyId ni countryId (el servidor los deriva)
+          const scheduledRes = await createScheduledTripCallable({
+            travellerId: resolvedTraveller.id,
+            passengerCount: passengersCount,
+            scheduledPickupAt: new Date(scheduledDateTime).toISOString(),
+            originAddress: originPoint.address,
+            originLatitude: originPoint.lat,
+            originLongitude: originPoint.lng,
+            destinationAddress: destPoint.address,
+            destinationLatitude: destPoint.lat,
+            destinationLongitude: destPoint.lng,
+            legs,
+            rideTimeMinutes: totalRideTimeMinutes,
+            etaMinutes: 15,
+            paymentMethod: String(company?.paymentCondition || "credit"),
+            costCentreId: selectedCC?.id,
+          });
+          createdScheduledTripId = scheduledRes.data?.scheduledTripId;
+          createdTripId = createdScheduledTripId;
+          serverFareBreakdown = scheduledRes.data?.quote;
+        } else {
+          // Viaje inmediato B2B (solo cuando company.allowsImmediateTrips === true)
+          const res = await createTripCallable<
+            any,
+            { tripId: string; fareBreakdown?: any }
+          >({
+            originAddress: originPoint.address,
+            originLatitude: originPoint.lat,
+            originLongitude: originPoint.lng,
+            destinationAddress: destPoint.address,
+            destinationLatitude: destPoint.lat,
+            destinationLongitude: destPoint.lng,
+            rideTimeMinutes: totalRideTimeMinutes,
+            travellerId: resolvedTraveller.id,
+            categoryId: backendCategoryId,
+            costCentreId: selectedCC?.id,
+            legs,
+          });
+          createdTripId = res.data?.tripId;
+          serverFareBreakdown = res.data?.fareBreakdown;
+        }
       } catch (callableErr: any) {
         const msg = String(callableErr?.message || "");
         if (
@@ -498,23 +656,28 @@ export default function NuevaSolicitudPortalB2BPage() {
             "El centro de costo de la empresa ha alcanzado su techo de consumo para este periodo."
           );
         }
-        console.warn(
-          "[PortalB2B] createTripCallable fallback to b2bRequests:",
-          callableErr
+        throw new Error(
+          msg || "No se pudo registrar la reserva en el servidor B2B."
         );
       }
 
       const baseFareAmount =
-        typeof serverFareBreakdown?.farePrice === "number"
-          ? serverFareBreakdown.farePrice
-          : effectiveBaseAmount;
-      const taxAmount = Number(
-        (baseFareAmount * effectiveTaxRate).toFixed(2)
-      );
-      const totalWithTax = Number((baseFareAmount + taxAmount).toFixed(2));
+        typeof serverFareBreakdown?.baseAmount === "number"
+          ? serverFareBreakdown.baseAmount
+          : typeof serverFareBreakdown?.farePrice === "number"
+            ? serverFareBreakdown.farePrice
+            : effectiveBaseAmount;
+      const taxAmount =
+        typeof serverFareBreakdown?.taxAmount === "number"
+          ? serverFareBreakdown.taxAmount
+          : Number((baseFareAmount * effectiveTaxRate).toFixed(2));
+      const totalWithTax =
+        typeof serverFareBreakdown?.totalAmount === "number"
+          ? serverFareBreakdown.totalAmount
+          : Number((baseFareAmount + taxAmount).toFixed(2));
 
       const fallbackBreakdown = {
-        countryId: "sv",
+        countryId: String(company?.countryId || "sv").toLowerCase(),
         currency: "USD",
         currencyCode: "USD",
         distanceUnit: "km",
@@ -532,73 +695,81 @@ export default function NuevaSolicitudPortalB2BPage() {
         minimumApplied: effectiveChargedDistance <= effectiveMinDistance,
       };
 
-      await addDoc(collection(db, "b2bRequests"), {
-        folio,
-        tripId: createdTripId || null,
-        countryId: "sv",
-        companyId: company?.id || "demoCompanySv",
-        companyName:
-          company?.tradeName || company?.legalName || "Empresa Corporativa SV",
-        costCenterId: selectedCC?.id || null,
-        costCenterName: selectedCC?.name || null,
-        requestedByUid: user?.uid || "portalUser",
-        requestedByName:
-          company?.contactName ||
-          company?.contactPerson ||
-          user?.email ||
-          "Usuario Corporativo",
-        travellerId: resolvedTraveller?.id || null,
-        travellerName: resolvedTraveller?.fullName || null,
-        passengersCount,
-        passengerNames: passengerNamesInput
-          .split(",")
-          .map((n) => n.trim())
-          .filter(Boolean),
-        passengerPhone: passengerPhone.trim(),
-        vehicleCategory,
-        hasCargo,
-        cargoDescription: hasCargo ? cargoDescription.trim() : null,
-        origin: originPoint,
-        stops: stopPoints,
-        destination: destPoint,
-        legs,
-        roundTrip,
-        scheduledAt: isImmediate
-          ? new Date().toISOString()
-          : new Date(scheduledDateTime).toISOString(),
-        isImmediate,
-        estimatedDistanceKm: effectiveChargedDistance,
-        estimatedDurationMinutes: totalRideTimeMinutes,
-        tariffApplied: {
-          category: vehicleCategory,
-          ratePerKm: effectiveRate,
-          minFare: Number((effectiveMinDistance * effectiveRate).toFixed(2)),
-          baseDistanceKm: effectiveMinDistance,
-          baseAmount: baseFareAmount,
-          taxRate: effectiveTaxRate,
-          taxLabel: effectiveTaxLabel,
-          taxAmount,
-          calculatedAmount: totalWithTax,
-        },
-        fareBreakdown: serverFareBreakdown
-          ? {
-              ...serverFareBreakdown,
+      // CF-41: b2bRequests requiere companyId === request.auth.token.companyId
+      if (company?.id) {
+        try {
+          await addDoc(collection(db, "b2bRequests"), {
+            folio,
+            tripId: createdTripId || null,
+            scheduledTripId: createdScheduledTripId || null,
+            countryId: String(company.countryId || "sv").toLowerCase(),
+            companyId: company.id,
+            companyName:
+              company.tradeName || company.legalName || "Empresa Corporativa SV",
+            costCenterId: selectedCC?.id || null,
+            costCenterName: selectedCC?.name || null,
+            requestedByUid: user?.uid || "portalUser",
+            requestedByName:
+              company.contactName ||
+              company.contactPerson ||
+              user?.email ||
+              "Usuario Corporativo",
+            travellerId: resolvedTraveller.id,
+            travellerName: resolvedTraveller.fullName,
+            passengersCount,
+            passengerNames: passengerNamesInput
+              .split(",")
+              .map((n) => n.trim())
+              .filter(Boolean),
+            passengerPhone: passengerPhone.trim(),
+            vehicleCategory,
+            hasCargo,
+            cargoDescription: hasCargo ? cargoDescription.trim() : null,
+            origin: originPoint,
+            stops: stopPoints,
+            destination: destPoint,
+            legs,
+            roundTrip,
+            scheduledAt: isImmediate
+              ? new Date().toISOString()
+              : new Date(scheduledDateTime).toISOString(),
+            isImmediate,
+            estimatedDistanceKm: effectiveChargedDistance,
+            estimatedDurationMinutes: totalRideTimeMinutes,
+            tariffApplied: {
+              category: vehicleCategory,
+              ratePerKm: effectiveRate,
+              minFare: Number((effectiveMinDistance * effectiveRate).toFixed(2)),
+              baseDistanceKm: effectiveMinDistance,
               baseAmount: baseFareAmount,
               taxRate: effectiveTaxRate,
               taxLabel: effectiveTaxLabel,
               taxAmount,
-              totalAmount: totalWithTax,
-            }
-          : fallbackBreakdown,
-        baseAmount: baseFareAmount,
-        taxAmount,
-        taxRate: effectiveTaxRate,
-        finalAmount: totalWithTax,
-        status: "requested",
-        notes: notes.trim() || null,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
+              calculatedAmount: totalWithTax,
+            },
+            fareBreakdown: serverFareBreakdown
+              ? {
+                  ...serverFareBreakdown,
+                  baseAmount: baseFareAmount,
+                  taxRate: effectiveTaxRate,
+                  taxLabel: effectiveTaxLabel,
+                  taxAmount,
+                  totalAmount: totalWithTax,
+                }
+              : fallbackBreakdown,
+            baseAmount: baseFareAmount,
+            taxAmount,
+            taxRate: effectiveTaxRate,
+            finalAmount: totalWithTax,
+            status: "requested",
+            notes: notes.trim() || null,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
+        } catch (mirrorErr) {
+          console.warn("[PortalB2B] b2bRequests mirror write skipped:", mirrorErr);
+        }
+      }
 
       router.push("/");
     } catch (err: any) {
@@ -675,171 +846,322 @@ export default function NuevaSolicitudPortalB2BPage() {
                 </button>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="text-xs font-semibold text-[#5A6A85] block mb-1">
-                    Punto Corporativo Origen (SV)
-                  </label>
-                  <select
-                    value={originIndex}
-                    onChange={(e) => {
-                      const idx = Number(e.target.value);
-                      setOriginIndex(idx);
-                      setOriginAddress(EL_SALVADOR_LOCATIONS[idx].address);
-                    }}
-                    className="w-full text-xs border border-[#DFE5EF] rounded-[6px] px-3 py-2.5 bg-white"
-                  >
-                    {EL_SALVADOR_LOCATIONS.map((loc, i) => (
-                      <option key={i} value={i}>
-                        {loc.label}
-                      </option>
-                    ))}
-                  </select>
+              {/* Origen con Google Places y Dropdown de Hubs */}
+              <div className="space-y-1">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-semibold text-[#2A3547]">
+                    Punto de Origen <span className="text-[#FA896B]">*</span>
+                  </span>
+                  <div className="relative">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setOpenOriginHubs(!openOriginHubs);
+                        setOpenDestHubs(false);
+                        setOpenStopHubsIdx(null);
+                      }}
+                      className="text-[11px] font-semibold text-[#5D87FF] bg-[#ECF2FF] hover:bg-[#DFE5EF] px-2 py-0.5 rounded-[5px] flex items-center space-x-1 transition cursor-pointer"
+                    >
+                      <Building className="w-3 h-3" />
+                      <span>Hubs frecuentes SV</span>
+                      <ChevronDown className="w-3 h-3" />
+                    </button>
+                    {openOriginHubs && (
+                      <div className="absolute right-0 top-full mt-1 w-80 bg-white rounded-[8px] shadow-xl border border-[#DFE5EF] z-30 py-1.5 max-h-64 overflow-y-auto">
+                        <div className="px-3 py-1 text-[10px] font-bold text-[#7C8FAC] uppercase tracking-wide border-b border-[#E5EAEF] mb-1">
+                          Puntos Corporativos Frecuentes (SV)
+                        </div>
+                        {EL_SALVADOR_LOCATIONS.map((loc, i) => (
+                          <button
+                            key={i}
+                            type="button"
+                            onClick={() => {
+                              setOriginCoord({
+                                address: loc.address,
+                                lat: loc.lat,
+                                lng: loc.lng,
+                              });
+                              setOpenOriginHubs(false);
+                            }}
+                            className={`w-full text-left px-3 py-1.5 text-xs flex flex-col transition cursor-pointer ${
+                              originCoord.address === loc.address
+                                ? "bg-[#ECF2FF] text-[#5D87FF]"
+                                : "hover:bg-[#F2F6FA] text-[#2A3547]"
+                            }`}
+                          >
+                            <span className="font-bold flex items-center space-x-1.5">
+                              <MapPin className="w-3 h-3 text-[#5D87FF] shrink-0" />
+                              <span className="truncate">{loc.label}</span>
+                            </span>
+                            <span className="text-[10px] text-[#7C8FAC] truncate pl-4.5">
+                              {loc.address}
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 </div>
-                <div>
-                  <label className="text-xs font-semibold text-[#5A6A85] block mb-1">
-                    Dirección Exacta de Origen *
-                  </label>
-                  <input
-                    type="text"
-                    value={originAddress}
-                    onChange={(e) => setOriginAddress(e.target.value)}
-                    className="w-full text-xs border border-[#DFE5EF] rounded-[6px] px-3 py-2.5"
-                    required
-                  />
-                </div>
+
+                <GoogleAddressAutocomplete
+                  placeholder="Buscar dirección o punto de interés (ej. WTC, Sheraton, Hilton, Calle El Mirador...)"
+                  value={originCoord.address}
+                  required
+                  onChange={(sel) => {
+                    setOriginCoord({
+                      address: sel.address,
+                      lat: sel.lat,
+                      lng: sel.lng,
+                    });
+                  }}
+                />
               </div>
 
               {/* Paradas Intermedias */}
               {stops.map((st, idx) => (
                 <div
                   key={idx}
-                  className="p-3 bg-[#F8FAFC] border border-[#E5EAEF] rounded-[7px] grid grid-cols-1 sm:grid-cols-12 gap-2 items-end"
+                  className="p-3 bg-[#F8FAFC] border border-[#E5EAEF] rounded-[7px] space-y-1.5"
                 >
-                  <div className="sm:col-span-5">
-                    <label className="text-[11px] font-semibold text-[#5D87FF] block mb-1">
-                      Parada #{idx + 1} (Referencia)
-                    </label>
-                    <select
-                      value={st.presetIndex}
-                      onChange={(e) => {
-                        const nIdx = Number(e.target.value);
-                        setStops((prev) =>
-                          prev.map((item, i) =>
-                            i === idx
-                              ? {
-                                  presetIndex: nIdx,
-                                  address: EL_SALVADOR_LOCATIONS[nIdx].address,
-                                }
-                              : item
-                          )
-                        );
-                      }}
-                      className="w-full text-xs border border-[#DFE5EF] rounded-[6px] px-2.5 py-2 bg-white"
-                    >
-                      {EL_SALVADOR_LOCATIONS.map((loc, i) => (
-                        <option key={i} value={i}>
-                          {loc.label}
-                        </option>
-                      ))}
-                    </select>
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-bold text-[#5D87FF] uppercase">
+                      Parada Intermedia #{idx + 1}
+                    </span>
+                    <div className="flex items-center space-x-2">
+                      <div className="relative">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setOpenStopHubsIdx(openStopHubsIdx === idx ? null : idx);
+                            setOpenOriginHubs(false);
+                            setOpenDestHubs(false);
+                          }}
+                          className="text-[11px] font-semibold text-[#5D87FF] bg-white border border-[#DFE5EF] hover:border-[#5D87FF] px-2 py-0.5 rounded-[5px] flex items-center space-x-1 transition cursor-pointer"
+                        >
+                          <Building className="w-3 h-3" />
+                          <span>Hubs SV</span>
+                          <ChevronDown className="w-3 h-3" />
+                        </button>
+                        {openStopHubsIdx === idx && (
+                          <div className="absolute right-0 top-full mt-1 w-80 bg-white rounded-[8px] shadow-xl border border-[#DFE5EF] z-30 py-1.5 max-h-64 overflow-y-auto">
+                            <div className="px-3 py-1 text-[10px] font-bold text-[#7C8FAC] uppercase tracking-wide border-b border-[#E5EAEF] mb-1">
+                              Seleccionar Parada Corporativa
+                            </div>
+                            {EL_SALVADOR_LOCATIONS.map((loc, i) => (
+                              <button
+                                key={i}
+                                type="button"
+                                onClick={() => {
+                                  setStops((prev) =>
+                                    prev.map((item, itIdx) =>
+                                      itIdx === idx
+                                        ? {
+                                            ...item,
+                                            address: loc.address,
+                                            lat: loc.lat,
+                                            lng: loc.lng,
+                                          }
+                                        : item
+                                    )
+                                  );
+                                  setOpenStopHubsIdx(null);
+                                }}
+                                className={`w-full text-left px-3 py-1.5 text-xs flex flex-col transition cursor-pointer ${
+                                  st.address === loc.address
+                                    ? "bg-[#ECF2FF] text-[#5D87FF]"
+                                    : "hover:bg-[#F2F6FA] text-[#2A3547]"
+                                }`}
+                              >
+                                <span className="font-bold flex items-center space-x-1.5">
+                                  <MapPin className="w-3 h-3 text-[#5D87FF] shrink-0" />
+                                  <span className="truncate">{loc.label}</span>
+                                </span>
+                                <span className="text-[10px] text-[#7C8FAC] truncate pl-4.5">
+                                  {loc.address}
+                                </span>
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setStops((prev) => prev.filter((_, i) => i !== idx))
+                        }
+                        className="p-1 text-[#FA896B] hover:bg-[#FDEDE8] rounded cursor-pointer"
+                        title="Eliminar parada"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
                   </div>
-                  <div className="sm:col-span-6">
-                    <label className="text-[11px] font-semibold text-[#5A6A85] block mb-1">
-                      Dirección Parada #{idx + 1}
-                    </label>
-                    <input
-                      type="text"
-                      value={st.address}
-                      onChange={(e) => {
-                        const val = e.target.value;
-                        setStops((prev) =>
-                          prev.map((item, i) =>
-                            i === idx ? { ...item, address: val } : item
-                          )
-                        );
-                      }}
-                      className="w-full text-xs border border-[#DFE5EF] rounded-[6px] px-2.5 py-2 bg-white"
-                    />
-                  </div>
-                  <div className="sm:col-span-1 text-right">
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setStops((prev) => prev.filter((_, i) => i !== idx))
-                      }
-                      className="p-2 text-[#FA896B] hover:bg-[#FDEDE8] rounded"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
-                  </div>
+                  <GoogleAddressAutocomplete
+                    placeholder="Buscar punto intermedio en El Salvador..."
+                    value={st.address}
+                    onChange={(sel) => {
+                      setStops((prev) =>
+                        prev.map((item, i) =>
+                          i === idx
+                            ? {
+                                ...item,
+                                address: sel.address,
+                                lat: sel.lat,
+                                lng: sel.lng,
+                              }
+                            : item
+                        )
+                      );
+                    }}
+                  />
                 </div>
               ))}
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <div>
-                  <label className="text-xs font-semibold text-[#5A6A85] block mb-1">
-                    Punto Corporativo Destino (SV)
-                  </label>
-                  <select
-                    value={destinationIndex}
-                    onChange={(e) => {
-                      const idx = Number(e.target.value);
-                      setDestinationIndex(idx);
-                      setDestinationAddress(EL_SALVADOR_LOCATIONS[idx].address);
-                    }}
-                    className="w-full text-xs border border-[#DFE5EF] rounded-[6px] px-3 py-2.5 bg-white"
-                  >
-                    {EL_SALVADOR_LOCATIONS.map((loc, i) => (
-                      <option key={i} value={i}>
-                        {loc.label}
-                      </option>
-                    ))}
-                  </select>
+              {/* Destino con Google Places y Dropdown de Hubs */}
+              <div className="space-y-1">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-semibold text-[#2A3547]">
+                    Punto de Destino <span className="text-[#FA896B]">*</span>
+                  </span>
+                  <div className="relative">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setOpenDestHubs(!openDestHubs);
+                        setOpenOriginHubs(false);
+                        setOpenStopHubsIdx(null);
+                      }}
+                      className="text-[11px] font-semibold text-[#5D87FF] bg-[#ECF2FF] hover:bg-[#DFE5EF] px-2 py-0.5 rounded-[5px] flex items-center space-x-1 transition cursor-pointer"
+                    >
+                      <Building className="w-3 h-3" />
+                      <span>Hubs frecuentes SV</span>
+                      <ChevronDown className="w-3 h-3" />
+                    </button>
+                    {openDestHubs && (
+                      <div className="absolute right-0 top-full mt-1 w-80 bg-white rounded-[8px] shadow-xl border border-[#DFE5EF] z-30 py-1.5 max-h-64 overflow-y-auto">
+                        <div className="px-3 py-1 text-[10px] font-bold text-[#7C8FAC] uppercase tracking-wide border-b border-[#E5EAEF] mb-1">
+                          Puntos Corporativos Frecuentes (SV)
+                        </div>
+                        {EL_SALVADOR_LOCATIONS.map((loc, i) => (
+                          <button
+                            key={i}
+                            type="button"
+                            onClick={() => {
+                              setDestinationCoord({
+                                address: loc.address,
+                                lat: loc.lat,
+                                lng: loc.lng,
+                              });
+                              setOpenDestHubs(false);
+                            }}
+                            className={`w-full text-left px-3 py-1.5 text-xs flex flex-col transition cursor-pointer ${
+                              destinationCoord.address === loc.address
+                                ? "bg-[#ECF2FF] text-[#5D87FF]"
+                                : "hover:bg-[#F2F6FA] text-[#2A3547]"
+                            }`}
+                          >
+                            <span className="font-bold flex items-center space-x-1.5">
+                              <MapPin className="w-3 h-3 text-[#5D87FF] shrink-0" />
+                              <span className="truncate">{loc.label}</span>
+                            </span>
+                            <span className="text-[10px] text-[#7C8FAC] truncate pl-4.5">
+                              {loc.address}
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 </div>
-                <div>
-                  <label className="text-xs font-semibold text-[#5A6A85] block mb-1">
-                    Dirección Exacta de Destino *
-                  </label>
-                  <input
-                    type="text"
-                    value={destinationAddress}
-                    onChange={(e) => setDestinationAddress(e.target.value)}
-                    className="w-full text-xs border border-[#DFE5EF] rounded-[6px] px-3 py-2.5"
-                    required
-                  />
-                </div>
+
+                <GoogleAddressAutocomplete
+                  placeholder="Buscar destino en El Salvador (ej. Aeropuerto Comalapa, Zona Franca, Hotel...)"
+                  value={destinationCoord.address}
+                  required
+                  onChange={(sel) => {
+                    setDestinationCoord({
+                      address: sel.address,
+                      lat: sel.lat,
+                      lng: sel.lng,
+                    });
+                  }}
+                />
               </div>
 
-              <div className="pt-3 border-t border-[#E5EAEF] grid grid-cols-1 sm:grid-cols-3 gap-3 items-center">
-                <label className="flex items-center space-x-2 text-xs font-semibold cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={roundTrip}
-                    onChange={(e) => setRoundTrip(e.target.checked)}
-                    className="rounded text-[#5D87FF]"
-                  />
-                  <span>Viaje Ida y Vuelta (2x km)</span>
-                </label>
+              {/* Mapa Interactivo de Ruta con Google Maps API */}
+              <div className="pt-2">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-xs font-bold text-[#2A3547] flex items-center space-x-1.5">
+                    <MapPin className="w-3.5 h-3.5 text-[#5D87FF]" />
+                    <span>Ruta Vial y Tiempo Estimado en Vivo (Google Maps API SV)</span>
+                  </span>
+                  {googleDistanceKm !== null && (
+                    <span className="text-[11px] font-semibold text-[#13DEB9]">
+                      Calculado por DirectionsService
+                    </span>
+                  )}
+                </div>
+                <GoogleRouteMap
+                  origin={originCoord}
+                  destination={destinationCoord}
+                  stops={stops}
+                  roundTrip={roundTrip}
+                  height="260px"
+                  onRouteCalculated={({ distanceKm, durationMinutes }) => {
+                    setGoogleDistanceKm(distanceKm);
+                    setGoogleDurationMinutes(durationMinutes);
+                  }}
+                />
+              </div>
 
-                <label className="flex items-center space-x-2 text-xs font-semibold cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={!isImmediate}
-                    onChange={(e) => setIsImmediate(!e.target.checked)}
-                    className="rounded text-[#5D87FF]"
-                  />
-                  <span>Programar Fecha/Hora</span>
-                </label>
+              <div className="pt-3 border-t border-[#E5EAEF] space-y-2">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <label className="flex items-center space-x-2 text-xs font-semibold cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={roundTrip}
+                      onChange={(e) => setRoundTrip(e.target.checked)}
+                      className="rounded text-[#5D87FF]"
+                    />
+                    <span>Viaje Ida y Vuelta (2x km)</span>
+                  </label>
 
-                {!isImmediate && (
-                  <input
-                    type="datetime-local"
-                    value={scheduledDateTime}
-                    onChange={(e) => setScheduledDateTime(e.target.value)}
-                    className="text-xs border border-[#DFE5EF] rounded-[6px] px-2.5 py-2"
-                  />
-                )}
+                  <div className="flex items-center space-x-1.5 text-[11px] text-[#5A6A85] bg-[#F6F9FC] px-2.5 py-1 rounded border border-[#E5EAEF]">
+                    <Clock className="w-3.5 h-3.5 text-[#5D87FF]" />
+                    <span>Anticipación mínima requerida:</span>
+                    <select
+                      value={advanceHours}
+                      onChange={(e) => {
+                        const h = Number(e.target.value);
+                        setAdvanceHours(h);
+                        setScheduledDateTime(getMinReservationDateTime(h));
+                      }}
+                      className="bg-white border border-[#DFE5EF] rounded px-1.5 py-0.5 text-[11px] font-bold text-[#5D87FF]"
+                    >
+                      <option value={3}>3 horas (Requisito general SV)</option>
+                      <option value={6}>6 horas (Recomendado corporativo)</option>
+                      <option value={12}>12 horas</option>
+                      <option value={24}>24 horas</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-3">
+                  <div className="flex items-center space-x-2">
+                    <span className="text-xs font-semibold text-[#2A3547]">Fecha y Hora de Salida *:</span>
+                    <input
+                      type="datetime-local"
+                      min={getMinReservationDateTime(advanceHours)}
+                      value={scheduledDateTime}
+                      onChange={(e) => setScheduledDateTime(e.target.value)}
+                      className="text-xs border border-[#DFE5EF] rounded-[6px] px-2.5 py-2 font-medium"
+                      required
+                    />
+                  </div>
+                  <span className="text-[11px] font-semibold text-[#D97706] bg-[#FEF5E5] px-2 py-0.5 rounded border border-[#FFAE1F]/30">
+                    Viajes inmediatos inhabilitados hasta habilitar flota cercana
+                  </span>
+                </div>
               </div>
             </div>
 
@@ -890,20 +1212,18 @@ export default function NuevaSolicitudPortalB2BPage() {
                       disabled={!allowedCategories.includes("suv")}
                     >
                       SUV Corporativa (Máx. 4 pax) — Tarifa negociada $
-                      {effectiveRate.toFixed(2)}/km · Mín.{" "}
+                      {negotiatedRate.toFixed(2)}/km · Mín.{" "}
                       {effectiveMinDistance} km
                     </option>
                     <option
                       value="pickup"
                       disabled={!allowedCategories.includes("pickup")}
                     >
-                      Pick-up Doble Cabina (Máx. 4 pax) — Tarifa negociada $
-                      {effectiveRate.toFixed(2)}/km · Mín.{" "}
+                      Pick-up Doble Cabina (Máx. 4 pax) — Tarifa carga $0.75/km · Mín.{" "}
                       {effectiveMinDistance} km
                     </option>
                     <option value="microbus">
-                      Microbús Corporativo (Máx. 12 pax) — Tarifa negociada $
-                      {effectiveRate.toFixed(2)}/km · Mín.{" "}
+                      Microbús Corporativo (Máx. 12 pax) — Tarifa grupal $0.90/km · Mín.{" "}
                       {effectiveMinDistance} km
                     </option>
                   </select>
@@ -911,23 +1231,39 @@ export default function NuevaSolicitudPortalB2BPage() {
               </div>
 
               {passengersCount > MAX_VEHICLE_PASSENGER_CAPACITY && (
-                <div className="p-4 bg-[#FDEDE8] border border-[#FA896B] text-[#B91C1C] rounded-[7px] text-xs space-y-1.5">
+                <div className="p-4 bg-[#FDEDE8] border border-[#FA896B] text-[#B91C1C] rounded-[7px] text-xs space-y-2">
                   <div className="flex items-center space-x-2 font-bold text-sm">
                     <PhoneCall className="w-4 h-4 shrink-0" />
                     <span>
                       {isEn
-                        ? `Capacity Exceeded (${passengersCount} passengers > max ${MAX_VEHICLE_PASSENGER_CAPACITY}) — Please Contact Lilo`
-                        : `Capacidad Máxima Excedida (${passengersCount} pasajeros > límite de ${MAX_VEHICLE_PASSENGER_CAPACITY}) — Comunícate con Lilo`}
+                        ? `Capacity Exceeded (${passengersCount} passengers > max ${MAX_VEHICLE_PASSENGER_CAPACITY})`
+                        : `Capacidad Máxima Excedida (${passengersCount} pasajeros > límite de ${MAX_VEHICLE_PASSENGER_CAPACITY})`}
                     </span>
                   </div>
-                  <p className="leading-relaxed">
+                  <p className="leading-relaxed whitespace-pre-line text-[13px] font-semibold text-[#8B0000]">
                     {isEn
-                      ? `When the requested passenger capacity exceeds our maximum single-vehicle limit (${MAX_VEHICLE_PASSENGER_CAPACITY} passengers), please contact Lilo directly to coordinate your transfer:`
-                      : `Cuando la capacidad solicitada excede el límite máximo de los vehículos (${MAX_VEHICLE_PASSENGER_CAPACITY} pasajeros), por favor comunícate directamente con Lilo para coordinar tu pedido:`}{" "}
-                    <strong>WhatsApp {LILO_DIRECT_CONTACT.whatsapp}</strong> ·{" "}
-                    <strong>Tel. {LILO_DIRECT_CONTACT.phone}</strong> ·{" "}
-                    <strong>{LILO_DIRECT_CONTACT.email}</strong>
+                      ? `For trips with more than 12 passengers, please contact us by WhatsApp or phone and we will gladly assist you immediately.\nWe are at your service.`
+                      : `Para viajes de más de 12 pasajeros, contáctenos por WhatsApp o llamada y con gusto le ayudaremos de inmediato.\nEstamos para servirle.`}
                   </p>
+                  <div className="pt-1 flex flex-wrap items-center gap-2">
+                    <a
+                      href={`https://wa.me/${LILO_DIRECT_CONTACT.whatsapp.replace(/[^\d]/g, "")}?text=${encodeURIComponent(
+                        `Hola Lilo, requiero cotizar un viaje corporativo para ${passengersCount} pasajeros en El Salvador.`
+                      )}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center space-x-1.5 px-3 py-1.5 bg-[#25D366] text-white rounded font-bold hover:opacity-95 transition"
+                    >
+                      <span>WhatsApp {LILO_DIRECT_CONTACT.whatsapp}</span>
+                    </a>
+                    <a
+                      href={`tel:${LILO_DIRECT_CONTACT.phone}`}
+                      className="inline-flex items-center space-x-1.5 px-3 py-1.5 bg-white border border-[#DFE5EF] text-[#2A3547] rounded font-bold hover:bg-slate-50 transition"
+                    >
+                      <span>Llamar: {LILO_DIRECT_CONTACT.phone}</span>
+                    </a>
+                    <span className="text-[11px] text-[#5A6A85]">· {LILO_DIRECT_CONTACT.email}</span>
+                  </div>
                 </div>
               )}
 
@@ -1102,7 +1438,7 @@ export default function NuevaSolicitudPortalB2BPage() {
                   <>
                     <div className="flex justify-between">
                       <span className="text-[#7C8FAC]">
-                        Tarifa negociada B2B:
+                        {effectiveRateSourceLabel}:
                       </span>
                       <span className="font-semibold text-[#2A3547]">
                         ${effectiveRate.toFixed(2)} USD/km

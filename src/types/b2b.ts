@@ -21,6 +21,7 @@ export type CompanyStatus = "active" | "suspended" | "inactive";
 
 export interface B2BCompany {
   id: string;
+  name?: string;
   tradeName: string;
   legalName: string;
   nit: string;
@@ -39,6 +40,9 @@ export interface B2BCompany {
   creditLimit?: number | null;
   requiresInvoice: boolean;
   requiresCCF: boolean;
+  allowsImmediateTrips?: boolean;
+  allowsScheduledTrips?: boolean;
+  minimumBookingLeadMinutes?: number;
   balance: number;
   status: CompanyStatus;
   countryId: "SV" | "sv" | string;

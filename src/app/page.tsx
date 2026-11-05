@@ -7,6 +7,7 @@ import {
   addDoc,
   collection,
   doc,
+  getDocs,
   onSnapshot,
   query,
   serverTimestamp,
@@ -14,10 +15,43 @@ import {
   where,
 } from "firebase/firestore";
 import { ref as rtdbRef, onValue as onRtdbValue } from "firebase/database";
-import { cancelCompanyReservationCallable, db, rtdb } from "@/lib/firebase";
+import {
+  cancelCompanyReservationCallable,
+  cancelScheduledTripCallable,
+  listCompanyTripsCallable,
+  getCompanyPeriodSummaryCallable,
+  GetCompanyPeriodSummaryResponse,
+  listCostCentresCallable,
+  updateCostCentreCallable,
+  listTravellersCallable,
+  createTravellerCallable,
+  updateTravellerCallable,
+  TravellerRow,
+  listCompanyRatesCallable,
+  CompanyRateRow,
+  listTripEventsCallable,
+  TripEventRow,
+  reportTripIncidentCallable,
+  listTripIncidentsCallable,
+  TripIncidentRow,
+  IncidentType,
+  IncidentSeverity,
+  listCompanyScheduledTripsCallable,
+  CompanyScheduledTripRow,
+  requestCostCentreCallable,
+  listCostCentreRequestsCallable,
+  CostCentreRequestRow,
+  createCompanyUserCallable,
+  updateCompanyUserCallable,
+  resolveCompanyRoleId,
+  CompanyUserRow,
+  db,
+  rtdb,
+} from "@/lib/firebase";
 import { useAuth } from "@/context/AuthContext";
 import { useLanguage } from "@/context/LanguageContext";
 import { B2BRequestStatus, B2BServiceRequest, CostCenter } from "@/types/b2b";
+import GoogleTripTrackingMap from "@/components/maps/GoogleTripTrackingMap";
 import {
   Wallet,
   Phone,
@@ -39,6 +73,11 @@ import {
   Globe,
   Lock,
   ShieldCheck,
+  Users,
+  UserPlus,
+  Shield,
+  UserCheck,
+  UserX,
 } from "lucide-react";
 import toast from "react-hot-toast";
 
@@ -150,11 +189,97 @@ export default function CorporatePortalPage() {
     "month"
   );
 
+  // Hito 3 Callables State (CF-33, CF-45, CF-47, CF-61, CF-62, CF-63)
+  const [periodSummary, setPeriodSummary] =
+    useState<GetCompanyPeriodSummaryResponse | null>(null);
+  const [companyRates, setCompanyRates] = useState<CompanyRateRow[]>([]);
+  const [travellersList, setTravellersList] = useState<TravellerRow[]>([]);
+  const [newTravName, setNewTravName] = useState("");
+  const [newTravPhone, setNewTravPhone] = useState("+503 ");
+  const [newTravDoc, setNewTravDoc] = useState("");
+  const [newTravEmail, setNewTravEmail] = useState("");
+  const [creatingTraveller, setCreatingTraveller] = useState(false);
+
+  const [tripEvents, setTripEvents] = useState<TripEventRow[]>([]);
+  const [tripIncidents, setTripIncidents] = useState<TripIncidentRow[]>([]);
+  const [showIncidentForm, setShowIncidentForm] = useState(false);
+  const [incidentType, setIncidentType] = useState<IncidentType>("other");
+  const [incidentSeverity, setIncidentSeverity] =
+    useState<IncidentSeverity>("medium");
+  const [incidentDesc, setIncidentDesc] = useState("");
+  const [reportingIncident, setReportingIncident] = useState(false);
+
+  // CF-75 y CF-84: Reservas oficiales de empresa y Solicitudes de centros de costo
+  const [scheduledTrips, setScheduledTrips] = useState<CompanyScheduledTripRow[]>([]);
+  const [costCentreRequests, setCostCentreRequests] = useState<CostCentreRequestRow[]>([]);
+  const [showRequestCCModal, setShowRequestCCModal] = useState(false);
+  const [proposedCCName, setProposedCCName] = useState("");
+  const [proposedCCBudget, setProposedCCBudget] = useState("");
+  const [requestingCC, setRequestingCC] = useState(false);
+
+  // CF-39 & CF-44: Gestión de Usuarios Corporativos y Roles
+  const [companyUsers, setCompanyUsers] = useState<CompanyUserRow[]>([]);
+  const [showInviteUserModal, setShowInviteUserModal] = useState(false);
+  const [inviteEmail, setInviteEmail] = useState("");
+  const [inviteFirstName, setInviteFirstName] = useState("");
+  const [inviteLastName, setInviteLastName] = useState("");
+  const [inviteRole, setInviteRole] = useState<"operador" | "company_admin">("operador");
+  const [invitingUser, setInvitingUser] = useState(false);
+  const [updatingUserId, setUpdatingUserId] = useState<string | null>(null);
+
   useEffect(() => {
     if (!loading && !user) {
       router.push("/login");
     }
   }, [user, loading, router]);
+
+  const reloadAdminData = async () => {
+    if (!user || !company?.id || !isCompanyAdmin) return;
+    try {
+      const [summaryRes, ratesRes, ccRes, travRes, schedRes, ccReqRes] = await Promise.allSettled([
+        getCompanyPeriodSummaryCallable(),
+        listCompanyRatesCallable(),
+        listCostCentresCallable(),
+        listTravellersCallable(),
+        listCompanyScheduledTripsCallable(),
+        listCostCentreRequestsCallable(),
+      ]);
+      if (summaryRes.status === "fulfilled" && summaryRes.value.data) {
+        setPeriodSummary(summaryRes.value.data);
+      }
+      if (ratesRes.status === "fulfilled" && Array.isArray(ratesRes.value.data?.rates)) {
+        setCompanyRates(ratesRes.value.data.rates);
+      }
+      if (ccRes.status === "fulfilled" && Array.isArray(ccRes.value.data?.costCentres)) {
+        setCostCenters(
+          ccRes.value.data.costCentres.map((c) => ({
+            id: c.costCentreId,
+            name: c.name,
+            department: c.name,
+            budgetLimit: c.budgetLimit ?? null,
+            spent: c.spent ?? 0,
+            reserved: c.reserved ?? 0,
+            status: c.active ? "active" : "inactive",
+          }))
+        );
+      }
+      if (travRes.status === "fulfilled" && Array.isArray(travRes.value.data?.travellers)) {
+        setTravellersList(travRes.value.data.travellers);
+      }
+      if (schedRes.status === "fulfilled" && Array.isArray(schedRes.value.data?.scheduledTrips)) {
+        setScheduledTrips(schedRes.value.data.scheduledTrips);
+      }
+      if (ccReqRes.status === "fulfilled" && Array.isArray(ccReqRes.value.data?.requests)) {
+        setCostCentreRequests(ccReqRes.value.data.requests);
+      }
+    } catch {
+      // Fallback a onSnapshot
+    }
+  };
+
+  useEffect(() => {
+    reloadAdminData();
+  }, [user, company?.id, isCompanyAdmin]);
 
   useEffect(() => {
     if (!company?.id) return;
@@ -177,6 +302,61 @@ export default function CorporatePortalPage() {
     );
     return () => unsubCC();
   }, [company?.id, company?.countryId]);
+
+  useEffect(() => {
+    if (!company?.id) return;
+    const cacheKey = `lilo_company_users_${company.id}`;
+    let initialList: CompanyUserRow[] = [];
+    try {
+      const cached = localStorage.getItem(cacheKey);
+      if (cached) initialList = JSON.parse(cached);
+    } catch {}
+
+    if (user?.email) {
+      const currentIdx = initialList.findIndex(
+        (u) => u.email.toLowerCase() === user.email?.toLowerCase()
+      );
+      const currentUserRow: CompanyUserRow = {
+        uid: user.uid,
+        email: user.email,
+        firstName: company.contactName || "Administrador",
+        companyRole: companyRole === "operator" ? "operador" : "company_admin",
+        isActive: true,
+      };
+      if (currentIdx === -1) {
+        initialList = [currentUserRow, ...initialList];
+      } else {
+        initialList[currentIdx] = { ...initialList[currentIdx], ...currentUserRow };
+      }
+    }
+    setCompanyUsers(initialList);
+
+    getDocs(query(collection(db, "users"), where("companyId", "==", company.id)))
+      .then((snap) => {
+        if (!snap.empty) {
+          const fetched: CompanyUserRow[] = snap.docs.map((d) => {
+            const data = d.data();
+            return {
+              uid: d.id,
+              email: data.email || "",
+              firstName: data.firstName,
+              lastName: data.lastName,
+              companyRole:
+                data.companyRole === "company_admin" ? "company_admin" : "operador",
+              isActive: data.isActive !== false,
+              createdAt: data.createdAt,
+            };
+          });
+          setCompanyUsers(fetched);
+          try {
+            localStorage.setItem(cacheKey, JSON.stringify(fetched));
+          } catch {}
+        }
+      })
+      .catch((err) => {
+        console.warn("[companyUsers] Consulta users no accesible:", err);
+      });
+  }, [company?.id, company?.contactName, user?.email, user?.uid, companyRole]);
 
   useEffect(() => {
     if (!user || !company?.id) {
@@ -335,68 +515,293 @@ export default function CorporatePortalPage() {
     };
   }, [filteredRequests]);
 
+  useEffect(() => {
+    const targetTripId =
+      liveSelectedRequest?.tripId ||
+      (liveSelectedRequest as any)?.scheduledTripId;
+    if (!targetTripId || !user) {
+      setTripEvents([]);
+      setTripIncidents([]);
+      return;
+    }
+    listTripEventsCallable({ tripId: targetTripId, limit: 25 })
+      .then((res) => setTripEvents(res.data?.events || []))
+      .catch(() => setTripEvents([]));
+
+    listTripIncidentsCallable({ tripId: targetTripId, limit: 20 })
+      .then((res) => setTripIncidents(res.data?.incidents || []))
+      .catch(() => setTripIncidents([]));
+  }, [
+    liveSelectedRequest?.tripId,
+    (liveSelectedRequest as any)?.scheduledTripId,
+    user,
+  ]);
+
   const handleSaveCostCenterCeiling = async (
     cc: CostCenter,
     newLimit: number | null
   ) => {
     if (!company?.id || !isCompanyAdmin) return;
-    const targetCountryId = String(company.countryId || "sv").toLowerCase();
     setSavingLimitId(cc.id);
     try {
-      await updateDoc(
-        doc(
-          db,
-          "countries",
-          targetCountryId,
-          "b2bCompanies",
-          company.id,
-          "costCenters",
-          cc.id
-        ),
-        {
-          budgetLimit: newLimit,
-          monthlyBudget: newLimit,
-          updatedAt: serverTimestamp(),
-        }
-      );
-      try {
-        await addDoc(
-          collection(
-            db,
-            "countries",
-            targetCountryId,
-            "b2bCompanies",
-            company.id,
-            "limitRequests"
-          ),
-          {
-            companyId: company.id,
-            costCentreId: cc.id,
-            currentBudgetLimit: cc.budgetLimit ?? null,
-            requestedBudgetLimit: newLimit,
-            reason:
-              newLimit === null
-                ? "Eliminación de techo (SIN LÍMITE) por company_admin"
-                : "Ajuste de techo de consumo por company_admin",
-            requestedBy: user?.uid || "companyAdmin",
-            requestedByEmail: user?.email || "",
-            status: "applied",
-            requestedAt: serverTimestamp(),
-          }
-        );
-      } catch {
-        // El cliente empresa escribe su propio techo directo en costCenters (CF-23)
-      }
+      // CF-46: company_admin solo puede mover budgetLimit vía updateCostCentreCallable (entero > 0 o null)
+      const normalizedLimit =
+        newLimit === null ? null : Math.max(1, Math.round(newLimit));
+      await updateCostCentreCallable({
+        costCentreId: cc.id,
+        budgetLimit: normalizedLimit,
+      });
       toast.success(
-        newLimit === null
+        normalizedLimit === null
           ? "Techo eliminado (Sin límite)"
-          : `Techo actualizado a $${newLimit.toFixed(2)} USD`
+          : `Techo actualizado a $${normalizedLimit.toFixed(2)} USD`
       );
-    } catch (err) {
+      await reloadAdminData();
+    } catch (err: any) {
       console.error("Error actualizando techo de consumo:", err);
-      toast.error("No se pudo actualizar el techo de consumo.");
+      toast.error(
+        err?.message || "No se pudo actualizar el techo de consumo."
+      );
     } finally {
       setSavingLimitId(null);
+    }
+  };
+
+  const handleRequestNewCostCentre = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!proposedCCName.trim()) {
+      toast.error("Ingresa el nombre del centro propuesto.");
+      return;
+    }
+    setRequestingCC(true);
+    try {
+      const budgetNum =
+        proposedCCBudget.trim() === ""
+          ? undefined
+          : Math.max(1, Math.round(Number(proposedCCBudget)));
+      await requestCostCentreCallable({
+        proposedName: proposedCCName.trim(),
+        proposedBudgetLimit: budgetNum,
+      });
+      setProposedCCName("");
+      setProposedCCBudget("");
+      setShowRequestCCModal(false);
+      toast.success("Solicitud enviada a plataforma para su aprobación.");
+      await reloadAdminData();
+    } catch (err: any) {
+      toast.error(err?.message || "No se pudo solicitar el centro de costo.");
+    } finally {
+      setRequestingCC(false);
+    }
+  };
+
+  const handleCreateTraveller = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newTravName.trim()) {
+      toast.error("Ingresa el nombre del viajero corporativo.");
+      return;
+    }
+    setCreatingTraveller(true);
+    try {
+      await createTravellerCallable({
+        name: newTravName.trim(),
+        phone: newTravPhone.trim() || undefined,
+        documentNumber: newTravDoc.trim() || undefined,
+        email: newTravEmail.trim() || undefined,
+      });
+      toast.success("Viajero corporativo creado correctamente");
+      setNewTravName("");
+      setNewTravPhone("+503 ");
+      setNewTravDoc("");
+      setNewTravEmail("");
+      await reloadAdminData();
+    } catch (err: any) {
+      toast.error(err?.message || "Error al crear viajero.");
+    } finally {
+      setCreatingTraveller(false);
+    }
+  };
+
+  const handleToggleTravellerActive = async (trav: TravellerRow) => {
+    try {
+      await updateTravellerCallable({
+        travellerId: trav.travellerId,
+        active: !trav.active,
+      });
+      toast.success(
+        !trav.active ? "Viajero reactivado" : "Viajero retirado (inactivo)"
+      );
+      await reloadAdminData();
+    } catch (err: any) {
+      toast.error(err?.message || "No se pudo actualizar el viajero.");
+    }
+  };
+
+  // CF-39 & CF-44: Handlers de Colaboradores Corporativos
+  const handleInviteUser = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!inviteEmail.trim() || !inviteEmail.includes("@")) {
+      toast.error("Ingresa un correo electrónico corporativo válido.");
+      return;
+    }
+    if (!company?.id) {
+      toast.error("No se pudo identificar la empresa actual.");
+      return;
+    }
+    setInvitingUser(true);
+    try {
+      const roleId = await resolveCompanyRoleId(inviteRole);
+      const normalizedEmail = inviteEmail.trim().toLowerCase();
+      const res = await createCompanyUserCallable({
+        email: normalizedEmail,
+        roleId,
+        firstName: inviteFirstName.trim() || undefined,
+        lastName: inviteLastName.trim() || undefined,
+        companyId: company.id,
+      });
+
+      const newUser: CompanyUserRow = {
+        uid: res.data?.uid || `user-${Date.now()}`,
+        email: normalizedEmail,
+        firstName: inviteFirstName.trim() || undefined,
+        lastName: inviteLastName.trim() || undefined,
+        companyRole: inviteRole,
+        isActive: true,
+        createdAt: new Date().toISOString(),
+      };
+
+      setCompanyUsers((prev) => {
+        const updated = [
+          newUser,
+          ...prev.filter((u) => u.email.toLowerCase() !== normalizedEmail),
+        ];
+        try {
+          localStorage.setItem(
+            `lilo_company_users_${company.id}`,
+            JSON.stringify(updated)
+          );
+        } catch {}
+        return updated;
+      });
+
+      toast.success(
+        `Invitación enviada a ${normalizedEmail}. El colaborador recibirá un enlace oficial para establecer su contraseña.`
+      );
+      setInviteEmail("");
+      setInviteFirstName("");
+      setInviteLastName("");
+      setInviteRole("operador");
+      setShowInviteUserModal(false);
+    } catch (err: any) {
+      console.error("[handleInviteUser] Error:", err);
+      toast.error(err?.message || "Error al invitar al colaborador.");
+    } finally {
+      setInvitingUser(false);
+    }
+  };
+
+  const handleToggleUserActive = async (targetUser: CompanyUserRow) => {
+    if (!company?.id) return;
+    setUpdatingUserId(targetUser.uid);
+    try {
+      const newStatus = !targetUser.isActive;
+      await updateCompanyUserCallable({
+        userId: targetUser.uid,
+        isActive: newStatus,
+      });
+      setCompanyUsers((prev) => {
+        const updated = prev.map((u) =>
+          u.uid === targetUser.uid ? { ...u, isActive: newStatus } : u
+        );
+        try {
+          localStorage.setItem(
+            `lilo_company_users_${company.id}`,
+            JSON.stringify(updated)
+          );
+        } catch {}
+        return updated;
+      });
+      toast.success(
+        newStatus
+          ? "Colaborador reactivado exitosamente."
+          : "Colaborador desactivado exitosamente."
+      );
+    } catch (err: any) {
+      toast.error(err?.message || "No se pudo actualizar el estado de la cuenta.");
+    } finally {
+      setUpdatingUserId(null);
+    }
+  };
+
+  const handleChangeUserRole = async (
+    targetUser: CompanyUserRow,
+    newRole: "company_admin" | "operador"
+  ) => {
+    if (!company?.id || targetUser.companyRole === newRole) return;
+    setUpdatingUserId(targetUser.uid);
+    try {
+      const roleId = await resolveCompanyRoleId(newRole);
+      await updateCompanyUserCallable({
+        userId: targetUser.uid,
+        roleId,
+      });
+      setCompanyUsers((prev) => {
+        const updated = prev.map((u) =>
+          u.uid === targetUser.uid ? { ...u, companyRole: newRole } : u
+        );
+        try {
+          localStorage.setItem(
+            `lilo_company_users_${company.id}`,
+            JSON.stringify(updated)
+          );
+        } catch {}
+        return updated;
+      });
+      toast.success(
+        `Rol actualizado a ${
+          newRole === "company_admin" ? "Administrador de Empresa" : "Operador"
+        }.`
+      );
+    } catch (err: any) {
+      toast.error(err?.message || "No se pudo actualizar el rol del colaborador.");
+    } finally {
+      setUpdatingUserId(null);
+    }
+  };
+
+  const handleReportIncident = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const targetTripId =
+      liveSelectedRequest?.tripId ||
+      (liveSelectedRequest as any)?.scheduledTripId;
+    if (!targetTripId) {
+      toast.error("Esta solicitud aún no tiene ID de viaje en el servidor.");
+      return;
+    }
+    if (!incidentDesc.trim()) {
+      toast.error("Describe la incidencia.");
+      return;
+    }
+    setReportingIncident(true);
+    try {
+      await reportTripIncidentCallable({
+        tripId: targetTripId,
+        type: incidentType,
+        severity: incidentSeverity,
+        description: incidentDesc.trim(),
+      });
+      toast.success("Incidencia registrada en el servidor.");
+      setIncidentDesc("");
+      setShowIncidentForm(false);
+      const incRes = await listTripIncidentsCallable({
+        tripId: targetTripId,
+        limit: 20,
+      });
+      setTripIncidents(incRes.data?.incidents || []);
+    } catch (err: any) {
+      toast.error(err?.message || "No se pudo registrar la incidencia.");
+    } finally {
+      setReportingIncident(false);
     }
   };
 
@@ -404,7 +809,24 @@ export default function CorporatePortalPage() {
     if (!window.confirm("¿Deseas cancelar esta solicitud de traslado?")) return;
     try {
       const target = requests.find((r) => r.id === reqId);
-      if (target?.tripId) {
+      const schedId = (target as any)?.scheduledTripId || target?.tripId;
+      if (schedId && !target?.isImmediate) {
+        try {
+          await cancelScheduledTripCallable({ scheduledTripId: schedId });
+        } catch (schedErr) {
+          console.warn(
+            "[PortalB2B] cancelScheduledTripCallable fallback:",
+            schedErr
+          );
+          if (target?.tripId) {
+            try {
+              await cancelCompanyReservationCallable({ tripId: target.tripId });
+            } catch {
+              // ignore
+            }
+          }
+        }
+      } else if (target?.tripId) {
         try {
           await cancelCompanyReservationCallable({ tripId: target.tripId });
         } catch (callableErr) {
@@ -418,8 +840,12 @@ export default function CorporatePortalPage() {
         status: "cancelled",
         updatedAt: serverTimestamp(),
       });
+      toast.success("Solicitud cancelada y cupo liberado.");
+      setSelectedRequest(null);
+      await reloadAdminData();
     } catch (err) {
       console.error("Error cancelando solicitud:", err);
+      toast.error("No se pudo cancelar la solicitud.");
     }
   };
 
@@ -583,20 +1009,23 @@ export default function CorporatePortalPage() {
               <span>{isEn ? "EN 🇺🇸 / ES" : "ES 🇸🇻 / EN"}</span>
             </button>
 
-            {/* Selector de Rol Corporativo LO-4.2 (company_admin vs analyst) */}
+            {/* Selector de Rol Corporativo (3 roles acordados: Admin, Operador y Analista) */}
             <select
               value={companyRole}
               onChange={(e) =>
-                setCompanyRole(e.target.value as "company_admin" | "analyst")
+                setCompanyRole(e.target.value as "company_admin" | "operator" | "analyst")
               }
               className="text-xs border border-[#DFE5EF] rounded-[6px] px-2.5 py-1.5 bg-[#ECF2FF] text-[#5D87FF] font-bold"
-              title="Rol Portal Corporativo (LO-4.2)"
+              title="Rol Portal Corporativo"
             >
               <option value="company_admin">
-                {isEn ? "Role: Company Admin" : "Rol: Admin Empresa"}
+                {isEn ? "Role: Admin" : "Rol: Administrador"}
+              </option>
+              <option value="operator">
+                {isEn ? "Role: Operator (Issue Services)" : "Rol: Operador (Emitir Servicios)"}
               </option>
               <option value="analyst">
-                {isEn ? "Role: Analyst (No Amounts)" : "Rol: Analista (Sin Montos)"}
+                {isEn ? "Role: Analyst (Accounts Payable)" : "Rol: Analista (Cuentas por Pagar)"}
               </option>
             </select>
 
@@ -637,9 +1066,11 @@ export default function CorporatePortalPage() {
                 </span>
               )}
               <span className="px-2 py-0.5 bg-white/20 rounded-[4px] text-[11px] font-semibold">
-                {isCompanyAdmin
+                {companyRole === "company_admin"
                   ? "Vista: Administrador Financiero"
-                  : "Vista: Analista Operativo (Solo Despacho)"}
+                  : companyRole === "operator"
+                  ? "Vista: Operador (Emisión de Servicios)"
+                  : "Vista: Analista (Cuentas por Pagar)"}
               </span>
             </div>
             <h1 className="text-2xl sm:text-3xl font-bold tracking-tight">
@@ -747,9 +1178,18 @@ export default function CorporatePortalPage() {
                   Configura el límite presupuestario mensual por departamento o déjalo en blanco para operar SIN LÍMITE
                 </p>
               </div>
-              <span className="text-xs font-semibold text-[#5D87FF] bg-[#ECF2FF] px-2.5 py-1 rounded">
-                Cadencia: {company?.billingPeriod || "monthly"}
-              </span>
+              <div className="flex items-center space-x-2">
+                <span className="text-xs font-semibold text-[#5D87FF] bg-[#ECF2FF] px-2.5 py-1 rounded">
+                  Cadencia: {company?.billingPeriod || "monthly"}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setShowRequestCCModal(true)}
+                  className="text-xs font-semibold text-white bg-[#5D87FF] hover:bg-[#4570EA] px-3 py-1 rounded cursor-pointer transition-colors"
+                >
+                  + Solicitar Centro
+                </button>
+              </div>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -840,6 +1280,345 @@ export default function CorporatePortalPage() {
                   </div>
                 );
               })}
+            </div>
+
+            {/* CF-84: Solicitudes de centros de costo */}
+            {costCentreRequests.length > 0 && (
+              <div className="mt-5 pt-4 border-t border-[#E5EAEF]">
+                <h3 className="text-xs font-bold text-[#5A6A85] uppercase tracking-wider mb-2">
+                  Solicitudes de Extensión Presupuestaria (CF-84)
+                </h3>
+                <div className="space-y-2">
+                  {costCentreRequests.map((req) => (
+                    <div
+                      key={req.requestId}
+                      className="flex items-center justify-between p-2.5 bg-white border border-[#E5EAEF] rounded text-xs"
+                    >
+                      <div>
+                        <span className="font-bold text-[#2A3547]">{req.proposedName}</span>
+                        <span className="text-[#7C8FAC] ml-2">
+                          {req.proposedBudgetLimit ? `Techo propuesto: $${req.proposedBudgetLimit}` : "Sin techo"} · {new Date(req.requestedAt).toLocaleDateString()}
+                        </span>
+                        {req.status === "rejected" && req.rejectionReason && (
+                          <p className="text-[11px] text-red-600 mt-0.5">Motivo de rechazo: {req.rejectionReason}</p>
+                        )}
+                      </div>
+                      <span
+                        className={`px-2 py-0.5 rounded font-bold text-[10px] uppercase ${
+                          req.status === "approved"
+                            ? "bg-emerald-100 text-emerald-800"
+                            : req.status === "rejected"
+                            ? "bg-red-100 text-red-800"
+                            : "bg-amber-100 text-amber-800"
+                        }`}
+                      >
+                        {req.status === "pending" ? "Pendiente Aprobación" : req.status === "approved" ? "Aprobado" : "Rechazado"}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Tarifas Corporativas (CF-45) y Directorio de Viajeros (CF-47) — Solo Admin */}
+        {isCompanyAdmin && (
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {/* Tarifas por Categoría (listCompanyRates — CF-45) */}
+            <div className="modern-card p-6 space-y-4">
+              <div className="flex items-center justify-between border-b border-[#E5EAEF] pb-3">
+                <div>
+                  <h2 className="text-base font-bold text-[#2A3547]">
+                    Tarifas Vigentes por Categoría (CF-45)
+                  </h2>
+                  <p className="text-xs text-[#7C8FAC]">
+                    Tarifa negociada por contrato o precio base del país
+                  </p>
+                </div>
+                {periodSummary && (
+                  <span className="text-[11px] font-semibold bg-[#E6FFFA] text-[#0D9488] px-2.5 py-1 rounded">
+                    Facturable Periodo: ${Number(periodSummary.billableTotal || 0).toFixed(2)} USD
+                  </span>
+                )}
+              </div>
+
+              {companyRates.length === 0 ? (
+                <p className="text-xs text-[#7C8FAC]">
+                  Las tarifas por categoría se resuelven automáticamente desde el motor B2B al cotizar.
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  {companyRates.map((r) => (
+                    <div
+                      key={r.categoryId}
+                      className="flex items-center justify-between p-3 rounded-[7px] bg-[#F8FAFC] border border-[#E5EAEF] text-xs"
+                    >
+                      <div>
+                        <span className="font-bold text-[#2A3547] uppercase block">
+                          {r.categoryName || r.categoryId}
+                        </span>
+                        <span className="text-[11px] text-[#7C8FAC]">
+                          ID: {r.categoryId}
+                        </span>
+                      </div>
+                      <div className="text-right">
+                        <span className="font-extrabold text-[#5D87FF] text-sm block">
+                          ${Number(r.fareRate).toFixed(2)} USD/km
+                        </span>
+                        <span
+                          className={`inline-block px-2 py-0.5 rounded text-[10px] font-bold ${
+                            r.hasNegotiatedRate
+                              ? "bg-[#ECF2FF] text-[#5D87FF]"
+                              : "bg-[#FEF5E5] text-[#D97706]"
+                          }`}
+                        >
+                          {r.hasNegotiatedRate ? "Tarifa negociada" : "Precio de país"}
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Directorio de Viajeros Corporativos (CF-47) */}
+            <div className="modern-card p-6 space-y-4">
+              <div className="flex items-center justify-between border-b border-[#E5EAEF] pb-3">
+                <div>
+                  <h2 className="text-base font-bold text-[#2A3547]">
+                    Directorio de Viajeros Corporativos (CF-47)
+                  </h2>
+                  <p className="text-xs text-[#7C8FAC]">
+                    Alta y retiro de viajeros autorizados para reservas B2B
+                  </p>
+                </div>
+                <span className="text-xs font-bold text-[#5D87FF] bg-[#ECF2FF] px-2.5 py-1 rounded">
+                  {travellersList.filter((t) => t.active).length} activos
+                </span>
+              </div>
+
+              <form
+                onSubmit={handleCreateTraveller}
+                className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs"
+              >
+                <input
+                  type="text"
+                  placeholder="Nombre completo *"
+                  value={newTravName}
+                  onChange={(e) => setNewTravName(e.target.value)}
+                  className="border border-[#DFE5EF] rounded px-2.5 py-1.5 bg-white"
+                  required
+                />
+                <input
+                  type="text"
+                  placeholder="Teléfono (+503 7000-0000)"
+                  value={newTravPhone}
+                  onChange={(e) => setNewTravPhone(e.target.value)}
+                  className="border border-[#DFE5EF] rounded px-2.5 py-1.5 bg-white"
+                />
+                <div className="flex space-x-1.5">
+                  <input
+                    type="text"
+                    placeholder="DUI opcional"
+                    value={newTravDoc}
+                    onChange={(e) => setNewTravDoc(e.target.value)}
+                    className="w-full border border-[#DFE5EF] rounded px-2.5 py-1.5 bg-white"
+                  />
+                  <button
+                    type="submit"
+                    disabled={creatingTraveller}
+                    className="px-3 py-1.5 bg-[#5D87FF] text-white font-bold rounded shrink-0 cursor-pointer disabled:opacity-50"
+                  >
+                    + Alta
+                  </button>
+                </div>
+              </form>
+
+              <div className="max-h-44 overflow-y-auto divide-y divide-[#E5EAEF] text-xs">
+                {travellersList.length === 0 ? (
+                  <p className="text-xs text-[#7C8FAC] py-2">
+                    No hay viajeros registrados aún. Agrega el primero arriba.
+                  </p>
+                ) : (
+                  travellersList.map((tr) => (
+                    <div
+                      key={tr.travellerId}
+                      className="py-2 flex items-center justify-between"
+                    >
+                      <div>
+                        <span className="font-semibold text-[#2A3547]">
+                          {tr.name}
+                        </span>
+                        <span className="text-[#7C8FAC] ml-2">
+                          {tr.phone || "Sin teléfono"}
+                          {tr.documentNumber ? ` · DUI ${tr.documentNumber}` : ""}
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleToggleTravellerActive(tr)}
+                        className={`px-2 py-0.5 rounded text-[10px] font-bold cursor-pointer ${
+                          tr.active
+                            ? "bg-[#E6FFFA] text-[#0D9488]"
+                            : "bg-[#FDEDE8] text-[#FA896B]"
+                        }`}
+                      >
+                        {tr.active ? "Activo (Retirar)" : "Inactivo (Reactivar)"}
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+
+            {/* Gestión de Usuarios y Roles Corporativos (CF-39 / CF-44) */}
+            <div className="modern-card p-6 lg:col-span-2 space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-[#E5EAEF] pb-3">
+                <div className="flex items-center space-x-3">
+                  <div className="w-10 h-10 rounded-lg bg-[#ECF2FF] flex items-center justify-center text-[#5D87FF]">
+                    <Users className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h2 className="text-base font-bold text-[#2A3547] flex items-center gap-2">
+                      <span>Equipo Corporativo y Gestión de Roles (CF-39 / CF-44)</span>
+                      <span className="text-[10px] font-bold uppercase tracking-wider bg-[#ECF2FF] text-[#5D87FF] px-2 py-0.5 rounded-full">
+                        Empresa
+                      </span>
+                    </h2>
+                    <p className="text-xs text-[#7C8FAC]">
+                      Administra los colaboradores con acceso al portal de tu empresa ({company?.tradeName || company?.name}).
+                      Las invitaciones envían un enlace de activación seguro a <span className="font-mono text-[#5D87FF]">/establecer-clave</span>.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center space-x-3">
+                  <span className="text-xs font-semibold text-[#7C8FAC]">
+                    {companyUsers.filter((u) => u.isActive).length} activos / {companyUsers.length} total
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setShowInviteUserModal(true)}
+                    className="px-3.5 py-2 bg-[#5D87FF] hover:bg-[#4570EA] text-white rounded-[6px] text-xs font-semibold flex items-center space-x-1.5 cursor-pointer shadow-sm transition"
+                  >
+                    <UserPlus className="w-4 h-4" />
+                    <span>Invitar Empleado</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Lista de Colaboradores */}
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead>
+                    <tr className="border-b border-[#E5EAEF] text-[#7C8FAC] font-semibold">
+                      <th className="py-2.5 px-3">Colaborador</th>
+                      <th className="py-2.5 px-3">Correo Electrónico</th>
+                      <th className="py-2.5 px-3">Rol Corporativo</th>
+                      <th className="py-2.5 px-3">Estado</th>
+                      <th className="py-2.5 px-3 text-right">Acciones</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[#E5EAEF]">
+                    {companyUsers.length === 0 ? (
+                      <tr>
+                        <td colSpan={5} className="py-6 text-center text-[#7C8FAC]">
+                          No hay colaboradores registrados. Haz clic en "Invitar Empleado" para agregar miembros al equipo.
+                        </td>
+                      </tr>
+                    ) : (
+                      companyUsers.map((u) => {
+                        const isSelf = u.email.toLowerCase() === user?.email?.toLowerCase();
+                        const isUpdating = updatingUserId === u.uid;
+                        return (
+                          <tr key={u.uid} className="hover:bg-[#F8FAFD] transition">
+                            <td className="py-3 px-3 font-semibold text-[#2A3547]">
+                              {u.firstName || u.lastName
+                                ? `${u.firstName || ""} ${u.lastName || ""}`.trim()
+                                : "Colaborador"}
+                              {isSelf && (
+                                <span className="ml-2 text-[10px] font-bold bg-[#ECF2FF] text-[#5D87FF] px-1.5 py-0.5 rounded">
+                                  Tú
+                                </span>
+                              )}
+                            </td>
+                            <td className="py-3 px-3 text-[#5A6A85] font-mono">
+                              {u.email}
+                            </td>
+                            <td className="py-3 px-3">
+                              <span
+                                className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold ${
+                                  u.companyRole === "company_admin"
+                                    ? "bg-[#EDE9FE] text-[#6D28D9]"
+                                    : "bg-[#E0F2FE] text-[#0369A1]"
+                                }`}
+                              >
+                                <Shield className="w-3 h-3" />
+                                {u.companyRole === "company_admin"
+                                  ? "Administrador de Empresa"
+                                  : "Operador de Traslados"}
+                              </span>
+                            </td>
+                            <td className="py-3 px-3">
+                              <span
+                                className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold ${
+                                  u.isActive
+                                    ? "bg-[#E6FFFA] text-[#0D9488]"
+                                    : "bg-[#FDEDE8] text-[#FA896B]"
+                                }`}
+                              >
+                                <span
+                                  className={`w-1.5 h-1.5 rounded-full ${
+                                    u.isActive ? "bg-[#0D9488]" : "bg-[#FA896B]"
+                                  }`}
+                                />
+                                {u.isActive ? "Activo" : "Inactivo"}
+                              </span>
+                            </td>
+                            <td className="py-3 px-3 text-right">
+                              <div className="flex items-center justify-end space-x-1.5">
+                                {!isSelf && (
+                                  <>
+                                    <button
+                                      type="button"
+                                      disabled={isUpdating}
+                                      onClick={() =>
+                                        handleChangeUserRole(
+                                          u,
+                                          u.companyRole === "company_admin"
+                                            ? "operador"
+                                            : "company_admin"
+                                        )
+                                      }
+                                      className="px-2 py-1 text-[11px] font-semibold border border-[#DFE5EF] hover:bg-[#F2F6FA] text-[#2A3547] rounded cursor-pointer transition disabled:opacity-50"
+                                      title="Cambiar rol entre Operador y Administrador"
+                                    >
+                                      Cambiar a {u.companyRole === "company_admin" ? "Operador" : "Admin"}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      disabled={isUpdating}
+                                      onClick={() => handleToggleUserActive(u)}
+                                      className={`px-2 py-1 text-[11px] font-bold rounded cursor-pointer transition disabled:opacity-50 ${
+                                        u.isActive
+                                          ? "bg-[#FDEDE8] text-[#FA896B] hover:bg-[#FCDAD2]"
+                                          : "bg-[#E6FFFA] text-[#0D9488] hover:bg-[#CCFBEF]"
+                                      }`}
+                                    >
+                                      {u.isActive ? "Desactivar" : "Reactivar"}
+                                    </button>
+                                  </>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })
+                    )}
+                  </tbody>
+                </table>
+              </div>
             </div>
           </div>
         )}
@@ -1128,6 +1907,17 @@ export default function CorporatePortalPage() {
 
             {/* Información de Conductor y Ruta */}
             <div className="space-y-3 text-xs">
+              {/* Mapa de Monitoreo en Vivo (Google Maps API + RTDB) */}
+              <GoogleTripTrackingMap
+                origin={liveSelectedRequest.origin}
+                destination={liveSelectedRequest.destination}
+                stops={liveSelectedRequest.stops}
+                driverLocation={driverTelemetry}
+                driverName={liveSelectedRequest.assignedDriverName}
+                vehiclePlate={liveSelectedRequest.assignedVehiclePlate}
+                height="220px"
+              />
+
               <div className="p-3 rounded-[7px] bg-[#ECF2FF] flex items-center justify-between">
                 <div>
                   <span className="text-[10px] uppercase font-bold text-[#5D87FF] block">
@@ -1242,6 +2032,138 @@ export default function CorporatePortalPage() {
                   </span>
                 </div>
               )}
+
+              {/* Bitácora de Eventos (CF-61) e Incidencias (CF-62 / CF-63) */}
+              <div className="pt-3 border-t border-[#E5EAEF] space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-[#2A3547]">
+                    Incidencias y Bitácora ({tripIncidents.length} incidencia(s))
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setShowIncidentForm((v) => !v)}
+                    className="text-[11px] font-bold text-[#FA896B] bg-[#FDEDE8] px-2.5 py-1 rounded cursor-pointer"
+                  >
+                    {showIncidentForm ? "Ocultar formulario" : "+ Reportar Incidencia"}
+                  </button>
+                </div>
+
+                {showIncidentForm && (
+                  <form
+                    onSubmit={handleReportIncident}
+                    className="p-3 bg-[#FFF8F6] border border-[#FA896B]/40 rounded-[7px] space-y-2"
+                  >
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="block text-[10px] font-bold text-[#5A6A85] mb-1">
+                          Tipo (CF-62)
+                        </label>
+                        <select
+                          value={incidentType}
+                          onChange={(e) =>
+                            setIncidentType(e.target.value as IncidentType)
+                          }
+                          className="w-full border border-[#DFE5EF] rounded px-2 py-1 bg-white text-xs"
+                        >
+                          <option value="driver_no_show">Conductor no llegó</option>
+                          <option value="passenger_no_show">Pasajero no llegó</option>
+                          <option value="route_deviation">Desvío de ruta</option>
+                          <option value="breakdown">Falla mecánica</option>
+                          <option value="accident">Accidente</option>
+                          <option value="safety">Seguridad</option>
+                          <option value="payment">Facturación / Cobro</option>
+                          <option value="other">Otro</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-bold text-[#5A6A85] mb-1">
+                          Severidad
+                        </label>
+                        <select
+                          value={incidentSeverity}
+                          onChange={(e) =>
+                            setIncidentSeverity(
+                              e.target.value as IncidentSeverity
+                            )
+                          }
+                          className="w-full border border-[#DFE5EF] rounded px-2 py-1 bg-white text-xs"
+                        >
+                          <option value="low">Baja</option>
+                          <option value="medium">Media</option>
+                          <option value="high">Alta</option>
+                          <option value="critical">Crítica</option>
+                        </select>
+                      </div>
+                    </div>
+                    <textarea
+                      rows={2}
+                      placeholder="Describe lo ocurrido (nota: reportar no cancela el viaje ni libera el techo — D-09)..."
+                      value={incidentDesc}
+                      onChange={(e) => setIncidentDesc(e.target.value)}
+                      className="w-full border border-[#DFE5EF] rounded px-2.5 py-1.5 bg-white text-xs"
+                      required
+                    />
+                    <div className="flex justify-end">
+                      <button
+                        type="submit"
+                        disabled={reportingIncident}
+                        className="px-3 py-1 bg-[#FA896B] text-white font-bold rounded text-xs cursor-pointer disabled:opacity-50"
+                      >
+                        {reportingIncident
+                          ? "Enviando..."
+                          : "Registrar Incidencia"}
+                      </button>
+                    </div>
+                  </form>
+                )}
+
+                {tripIncidents.length > 0 && (
+                  <div className="space-y-1.5">
+                    {tripIncidents.map((inc) => (
+                      <div
+                        key={inc.incidentId}
+                        className="p-2.5 rounded bg-[#F8FAFC] border border-[#E5EAEF] text-[11px]"
+                      >
+                        <div className="flex items-center justify-between font-bold text-[#2A3547]">
+                          <span>
+                            {inc.type.toUpperCase()} · Severidad: {inc.severity}
+                          </span>
+                          <span className="text-[#5D87FF]">{inc.status}</span>
+                        </div>
+                        <p className="text-[#5A6A85] mt-0.5">{inc.description}</p>
+                        {inc.resolutionNote && (
+                          <p className="text-[#0D9488] font-semibold mt-0.5">
+                            Resolución ({inc.resolutionCode}): {inc.resolutionNote}
+                          </p>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {tripEvents.length > 0 && (
+                  <div className="p-2.5 rounded bg-[#F8FAFC] border border-[#E5EAEF] space-y-1 max-h-28 overflow-y-auto">
+                    <span className="text-[10px] font-bold uppercase text-[#7C8FAC] block">
+                      Bitácora de Auditoría del Servidor (CF-61)
+                    </span>
+                    {tripEvents.map((ev) => (
+                      <div
+                        key={ev.eventId}
+                        className="text-[11px] text-[#5A6A85] flex justify-between"
+                      >
+                        <span>
+                          <strong>{ev.eventType}</strong>:{" "}
+                          {ev.fromStatus ? `${ev.fromStatus} → ` : ""}
+                          {ev.toStatus || ""}
+                        </span>
+                        <span className="text-[10px] text-[#7C8FAC]">
+                          {ev.at ? new Date(ev.at).toLocaleTimeString() : ""}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
 
             <div className="flex justify-end space-x-2 pt-3 border-t border-[#E5EAEF]">
@@ -1262,6 +2184,213 @@ export default function CorporatePortalPage() {
                 Cerrar
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Solicitar Nuevo Centro de Costo (CF-84) */}
+      {showRequestCCModal && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl shadow-2xl max-w-md w-full p-6 space-y-4">
+            <div className="flex items-center justify-between border-b border-[#E5EAEF] pb-3">
+              <div>
+                <h3 className="text-base font-bold text-[#2A3547]">
+                  Solicitar Centro de Costo (CF-84)
+                </h3>
+                <p className="text-xs text-[#7C8FAC]">
+                  Envía una solicitud a la plataforma de Lilo para habilitar una nueva partida presupuestaria
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowRequestCCModal(false)}
+                className="text-[#7C8FAC] hover:text-[#2A3547] text-lg font-bold"
+              >
+                ✕
+              </button>
+            </div>
+
+            <form onSubmit={handleRequestNewCostCentre} className="space-y-3 text-xs">
+              <div>
+                <label className="font-bold text-[#2A3547] block mb-1">
+                  Nombre Propuesto del Centro *
+                </label>
+                <input
+                  type="text"
+                  required
+                  placeholder="Ej: Operaciones Puerto Acajutla"
+                  value={proposedCCName}
+                  onChange={(e) => setProposedCCName(e.target.value)}
+                  className="w-full border border-[#DFE5EF] rounded px-3 py-2 bg-white text-xs"
+                />
+              </div>
+
+              <div>
+                <label className="font-bold text-[#2A3547] block mb-1">
+                  Techo Presupuestario Propuesto (USD)
+                </label>
+                <input
+                  type="number"
+                  min={1}
+                  step={1}
+                  placeholder="Opcional. Vacío = SIN TECHO"
+                  value={proposedCCBudget}
+                  onChange={(e) => setProposedCCBudget(e.target.value)}
+                  className="w-full border border-[#DFE5EF] rounded px-3 py-2 bg-white text-xs"
+                />
+                <span className="text-[10px] text-[#7C8FAC] block mt-0.5">
+                  Hereda la cadencia de cobro de la empresa ({company?.billingPeriod || "monthly"})
+                </span>
+              </div>
+
+              <div className="flex justify-end space-x-2 pt-2 border-t border-[#E5EAEF]">
+                <button
+                  type="button"
+                  onClick={() => setShowRequestCCModal(false)}
+                  className="px-3.5 py-2 border border-[#DFE5EF] rounded text-xs font-semibold text-[#5A6A85]"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={requestingCC}
+                  className="px-4 py-2 bg-[#5D87FF] text-white rounded text-xs font-bold disabled:opacity-50"
+                >
+                  {requestingCC ? "Enviando..." : "Enviar Solicitud"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Invitar Colaborador / Empleado Corporativo (CF-39) */}
+      {showInviteUserModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-xs p-4">
+          <div className="bg-white rounded-xl shadow-2xl border border-[#E5EAEF] max-w-md w-full p-6 space-y-4">
+            <div className="flex items-center justify-between border-b border-[#E5EAEF] pb-3">
+              <div className="flex items-center space-x-2">
+                <div className="w-8 h-8 rounded-lg bg-[#ECF2FF] flex items-center justify-center text-[#5D87FF]">
+                  <UserPlus className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-[#2A3547]">
+                    Invitar Empleado al Portal B2B
+                  </h3>
+                  <p className="text-xs text-[#7C8FAC]">
+                    {company?.tradeName || company?.name}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowInviteUserModal(false)}
+                className="text-[#7C8FAC] hover:text-[#2A3547] text-lg font-bold"
+              >
+                ✕
+              </button>
+            </div>
+
+            <form onSubmit={handleInviteUser} className="space-y-3.5 text-xs">
+              <div>
+                <label className="font-bold text-[#2A3547] block mb-1">
+                  Correo Electrónico Corporativo *
+                </label>
+                <input
+                  type="email"
+                  required
+                  placeholder="ejemplo@empresa.com"
+                  value={inviteEmail}
+                  onChange={(e) => setInviteEmail(e.target.value)}
+                  className="w-full border border-[#DFE5EF] rounded px-3 py-2 bg-white text-xs font-mono"
+                />
+                <span className="text-[10px] text-[#7C8FAC] block mt-0.5">
+                  El colaborador recibirá la invitación oficial en este correo.
+                </span>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="font-bold text-[#2A3547] block mb-1">
+                    Nombre
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="Carlos"
+                    value={inviteFirstName}
+                    onChange={(e) => setInviteFirstName(e.target.value)}
+                    className="w-full border border-[#DFE5EF] rounded px-3 py-2 bg-white text-xs"
+                  />
+                </div>
+                <div>
+                  <label className="font-bold text-[#2A3547] block mb-1">
+                    Apellido
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="Mendoza"
+                    value={inviteLastName}
+                    onChange={(e) => setInviteLastName(e.target.value)}
+                    className="w-full border border-[#DFE5EF] rounded px-3 py-2 bg-white text-xs"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="font-bold text-[#2A3547] block mb-1">
+                  Rol Corporativo B2B *
+                </label>
+                <select
+                  value={inviteRole}
+                  onChange={(e) =>
+                    setInviteRole(e.target.value as "operador" | "company_admin")
+                  }
+                  className="w-full border border-[#DFE5EF] rounded px-3 py-2 bg-white text-xs"
+                >
+                  <option value="operador">
+                    Operador de Traslados (Cotizaciones, reservas y monitoreo)
+                  </option>
+                  <option value="company_admin">
+                    Administrador de Empresa (Facturación, centros de costo y equipo)
+                  </option>
+                </select>
+              </div>
+
+              <div className="bg-[#F8FAFD] border border-[#DFE5EF] rounded-lg p-3 text-[11px] text-[#5A6A85] space-y-1">
+                <p className="font-semibold text-[#2A3547] flex items-center gap-1">
+                  <ShieldCheck className="w-3.5 h-3.5 text-[#5D87FF]" />
+                  <span>Seguridad de Acceso Lilo B2B (D-22 / CF-39)</span>
+                </p>
+                <p>
+                  No se generan contraseñas temporales. El empleado recibirá un enlace de un solo uso para establecer su contraseña en{" "}
+                  <span className="font-mono text-[#5D87FF]">/establecer-clave</span>.
+                </p>
+              </div>
+
+              <div className="flex justify-end space-x-2 pt-2 border-t border-[#E5EAEF]">
+                <button
+                  type="button"
+                  onClick={() => setShowInviteUserModal(false)}
+                  className="px-3.5 py-2 border border-[#DFE5EF] rounded text-xs font-semibold text-[#5A6A85]"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={invitingUser}
+                  className="px-4 py-2 bg-[#5D87FF] hover:bg-[#4570EA] text-white rounded text-xs font-bold disabled:opacity-50 flex items-center space-x-1.5 cursor-pointer"
+                >
+                  {invitingUser ? (
+                    <span>Enviando invitación...</span>
+                  ) : (
+                    <>
+                      <UserPlus className="w-3.5 h-3.5" />
+                      <span>Enviar Invitación Oficial</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

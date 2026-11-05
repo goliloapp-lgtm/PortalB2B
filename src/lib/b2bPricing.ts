@@ -15,6 +15,18 @@ export const LILO_DIRECT_CONTACT = {
   email: "corporativo@lilo.app",
 };
 
+/**
+ * Configuración oficial de restricciones de reservas corporativas B2B (Acuerdos comerciales El Salvador 2026)
+ */
+export const B2B_RESERVATION_CONFIG = {
+  allowImmediate: false, // Inmediatos inhabilitados hasta contar con flota cercana en zona
+  minAdvanceHours: 3,    // Anticipación mínima general obligatoria (3 horas)
+  corporateRecommendedHours: 6, // Anticipación recomendada para clientes corporativos (6 horas)
+};
+
+export const CAPACITY_EXCEEDED_MESSAGE_ES =
+  "Para viajes de más de 12 pasajeros, contáctenos por WhatsApp o llamada y con gusto le ayudaremos de inmediato.\nEstamos para servirle.";
+
 export interface B2BTariffRule {
   category: VehicleCategory;
   label: string;
@@ -31,31 +43,31 @@ export const EL_SALVADOR_B2B_TARIFFS: Record<VehicleCategory, B2BTariffRule> = {
     category: "suv",
     label: "SUV Corporativa (máx. 4 pasajeros)",
     shortLabel: "SUV",
-    ratePerKm: SV_DEFAULT_NEGOTIATED_RATE,
-    minFare: SV_DEFAULT_NEGOTIATED_RATE,
+    ratePerKm: SV_DEFAULT_NEGOTIATED_RATE, // $0.67 USD/km
+    minFare: 15.0,
     baseDistanceKm: SV_DEFAULT_MINIMUM_DISTANCE_KM,
     maxPassengers: 4,
-    description: "Tarifa negociada por km · Distancia mínima 1 km + IVA 13%",
+    description: "Tarifa estándar $0.67 USD/km · Máx. 4 pasajeros + IVA 13%",
   },
   pickup: {
     category: "pickup",
     label: "Pick-up Doble Cabina (máx. 4 pasajeros)",
     shortLabel: "Pick-up",
-    ratePerKm: SV_DEFAULT_NEGOTIATED_RATE,
-    minFare: SV_DEFAULT_NEGOTIATED_RATE,
+    ratePerKm: 0.75, // $0.75 USD/km
+    minFare: 18.0,
     baseDistanceKm: SV_DEFAULT_MINIMUM_DISTANCE_KM,
     maxPassengers: 4,
-    description: "Tarifa negociada por km · Distancia mínima 1 km + IVA 13%",
+    description: "Tarifa carga/terreno $0.75 USD/km · Máx. 4 pasajeros + IVA 13%",
   },
   microbus: {
     category: "microbus",
     label: "Microbús Corporativo (máx. 12 pasajeros)",
     shortLabel: "Microbús",
-    ratePerKm: SV_DEFAULT_NEGOTIATED_RATE,
-    minFare: SV_DEFAULT_NEGOTIATED_RATE,
+    ratePerKm: 0.9, // $0.90 USD/km
+    minFare: 25.0,
     baseDistanceKm: SV_DEFAULT_MINIMUM_DISTANCE_KM,
     maxPassengers: 12,
-    description: "Tarifa negociada por km · Distancia mínima 1 km + IVA 13%",
+    description: "Tarifa grupal $0.90 USD/km · Capacidad hasta 12 pasajeros + IVA 13%",
   },
 };
 
@@ -249,12 +261,24 @@ export function calculateB2BTariff(
 ): B2BTariffBreakdown {
   const baseRule =
     EL_SALVADOR_B2B_TARIFFS[category] || EL_SALVADOR_B2B_TARIFFS.suv;
-  const ratePerKm =
+  let ratePerKm = baseRule.ratePerKm;
+  if (
     typeof options?.negotiatedFareRate === "number" &&
     Number.isFinite(options.negotiatedFareRate) &&
     options.negotiatedFareRate > 0
-      ? options.negotiatedFareRate
-      : baseRule.ratePerKm;
+  ) {
+    if (category === "suv") {
+      ratePerKm = options.negotiatedFareRate;
+    } else if (category === "pickup") {
+      ratePerKm = Number(
+        (options.negotiatedFareRate * (0.75 / 0.67)).toFixed(2)
+      );
+    } else if (category === "microbus") {
+      ratePerKm = Number(
+        (options.negotiatedFareRate * (0.9 / 0.67)).toFixed(2)
+      );
+    }
+  }
   const minimumDistanceKm =
     typeof options?.minimumDistanceKm === "number" &&
     Number.isFinite(options.minimumDistanceKm) &&

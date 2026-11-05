@@ -16,14 +16,10 @@ import {
   ArrowRight,
   ArrowLeft,
   ShieldCheck,
-  KeyRound,
-  Sparkles,
   CheckCircle2,
 } from "lucide-react";
 import toast from "react-hot-toast";
 
-const DEMO_EMAIL = "empresa.demo@lilo.com";
-const DEMO_PASS = "LiloB2B2026!";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -68,11 +64,6 @@ export default function LoginPage() {
     }
   };
 
-  const handleFillDemo = () => {
-    setEmail(DEMO_EMAIL);
-    setPassword(DEMO_PASS);
-    toast.success("Credenciales de prueba cargadas", { icon: "🔑" });
-  };
 
   const handleRequestResetCode = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -85,7 +76,6 @@ export default function LoginPage() {
     try {
       await requestPasswordResetCodeCallable({
         email: targetEmail,
-        locale: "es",
       });
       toast.success(
         "Te hemos enviado un código de 6 dígitos a tu correo corporativo."
@@ -421,43 +411,6 @@ export default function LoginPage() {
           </form>
         )}
 
-        {/* Tarjeta de Acceso Rápido / Credenciales Demo */}
-        <div className="mt-6 p-4 bg-[#ECF2FF] border border-[#DFE5EF] rounded-[7px]">
-          <div className="flex items-center justify-between mb-2">
-            <div className="flex items-center space-x-1.5">
-              <KeyRound className="w-4 h-4 text-[#5D87FF]" />
-              <span className="text-xs font-bold text-[#5D87FF]">
-                Credenciales de Prueba Activas
-              </span>
-            </div>
-            <button
-              type="button"
-              onClick={handleFillDemo}
-              className="px-2 py-1 bg-white hover:bg-slate-50 text-[#5D87FF] text-[11px] font-semibold rounded-[4px] border border-[#DFE5EF] transition flex items-center space-x-1 shadow-2xs"
-            >
-              <Sparkles className="w-3 h-3 text-[#FFAE1F]" />
-              <span>Autocompletar</span>
-            </button>
-          </div>
-
-          <div className="space-y-1 text-[11px] text-[#2A3547] bg-white/70 p-2.5 rounded-[5px] border border-[#E5EAEF]">
-            <p>
-              <strong className="text-[#5A6A85]">Email:</strong>{" "}
-              <code className="bg-[#EAEFF4] px-1 py-0.5 rounded font-mono text-[#2A3547]">
-                {DEMO_EMAIL}
-              </code>
-            </p>
-            <p>
-              <strong className="text-[#5A6A85]">Pass:</strong>{" "}
-              <code className="bg-[#EAEFF4] px-1 py-0.5 rounded font-mono text-[#2A3547]">
-                {DEMO_PASS}
-              </code>
-            </p>
-            <p className="text-[10px] text-[#7C8FAC] pt-1 border-t border-[#E5EAEF] mt-1">
-              Empresa vinculada: <strong>Industrias El Ángel S.A. de C.V.</strong> (Saldo: $485.50 USD)
-            </p>
-          </div>
-        </div>
 
         {/* Footer info */}
         <div className="mt-5 pt-3 border-t border-[#E5EAEF] flex items-center justify-center space-x-1.5 text-xs text-[#7C8FAC]">

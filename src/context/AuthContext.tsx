@@ -20,7 +20,7 @@ import { auth, db, functions } from "@/lib/firebase";
 import { httpsCallable } from "firebase/functions";
 import { B2BCompany } from "@/types/b2b";
 
-export type CompanyPortalRole = "company_admin" | "analyst";
+export type CompanyPortalRole = "company_admin" | "operator" | "analyst";
 
 interface AuthContextType {
   user: User | null;
@@ -82,23 +82,34 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
         const userDocSnap = await getDoc(doc(db, "users", currentUser.uid));
         const userData = userDocSnap.exists() ? userDocSnap.data() : undefined;
 
-        const userMustChange = Boolean(userData?.mustChangePassword);
-        setMustChangePassword(userMustChange);
+        // CF-39: mustChangePassword y changeProvisionalPassword retirados; la clave se fija en /establecer-clave
+        setMustChangePassword(false);
 
-        const resolvedRole: CompanyPortalRole =
-          userData?.companyRole === "analyst" ||
-          userData?.companyRole === "analista" ||
-          tokenResult.claims.companyRole === "analyst" ||
-          tokenResult.claims.companyRole === "analista"
-            ? "analyst"
-            : "company_admin";
+        const rawRole = (
+          tokenResult.claims.companyRole ||
+          userData?.companyRole ||
+          ""
+        )
+          .toString()
+          .toLowerCase();
+        let resolvedRole: CompanyPortalRole = "company_admin";
+        if (rawRole === "operator" || rawRole === "operador") {
+          resolvedRole = "operator";
+        } else if (rawRole === "analyst" || rawRole === "analista") {
+          resolvedRole = "analyst";
+        }
         setCompanyRole(resolvedRole);
 
+        const claimCountryIds = Array.isArray(tokenResult.claims.countryIds)
+          ? (tokenResult.claims.countryIds as string[])
+          : [];
         const targetCountryId =
-          typeof userData?.countryId === "string" &&
-          userData.countryId.trim() !== ""
-            ? userData.countryId.trim().toLowerCase()
-            : "sv";
+          claimCountryIds.length > 0 && typeof claimCountryIds[0] === "string"
+            ? claimCountryIds[0].trim().toLowerCase()
+            : typeof userData?.countryId === "string" &&
+                userData.countryId.trim() !== ""
+              ? userData.countryId.trim().toLowerCase()
+              : "sv";
 
         const docCompanyId =
           typeof userData?.companyId === "string" &&
@@ -111,10 +122,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
             ? tokenResult.claims.companyId.trim()
             : "";
 
-        const targetCompanyId = docCompanyId || claimCompanyId;
+        const targetCompanyId = claimCompanyId || docCompanyId;
 
-        // Si users/{uid} ya tiene companyId pero el claim aún no estaba en el token, forzar un segundo refresh
+        // CF-09 / CF-20: Si users/{uid} ya tiene companyId pero el claim aún no estaba en el token, 1 reintento tras pausa corta
         if (docCompanyId && claimCompanyId !== docCompanyId) {
+          await new Promise((r) => setTimeout(r, 600));
           await currentUser.getIdToken(true);
           tokenResult = await currentUser.getIdTokenResult();
         }
@@ -131,13 +143,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
             (docSnap) => {
               if (docSnap.exists()) {
                 const compData = docSnap.data();
-                setCompany({ id: docSnap.id, ...compData } as B2BCompany);
-                if (
-                  userData?.mustChangePassword === undefined &&
-                  compData?.mustChangePassword
-                ) {
-                  setMustChangePassword(true);
-                }
+                setCompany({
+                  id: docSnap.id,
+                  ...compData,
+                  tradeName:
+                    compData.tradeName ||
+                    compData.name ||
+                    compData.legalName ||
+                    "Empresa Corporativa",
+                  balance:
+                    typeof compData.balance === "number" ? compData.balance : 0,
+                } as B2BCompany);
               }
               setLoading(false);
             },
