@@ -2,6 +2,7 @@
 
 import React, { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
+import toast from "react-hot-toast";
 import {
   addDoc,
   collection,
@@ -695,81 +696,13 @@ export default function NuevaSolicitudPortalB2BPage() {
         minimumApplied: effectiveChargedDistance <= effectiveMinDistance,
       };
 
-      // CF-41: b2bRequests requiere companyId === request.auth.token.companyId
-      if (company?.id) {
-        try {
-          await addDoc(collection(db, "b2bRequests"), {
-            folio,
-            tripId: createdTripId || null,
-            scheduledTripId: createdScheduledTripId || null,
-            countryId: String(company.countryId || "sv").toLowerCase(),
-            companyId: company.id,
-            companyName:
-              company.tradeName || company.legalName || "Empresa Corporativa SV",
-            costCenterId: selectedCC?.id || null,
-            costCenterName: selectedCC?.name || null,
-            requestedByUid: user?.uid || "portalUser",
-            requestedByName:
-              company.contactName ||
-              company.contactPerson ||
-              user?.email ||
-              "Usuario Corporativo",
-            travellerId: resolvedTraveller.id,
-            travellerName: resolvedTraveller.fullName,
-            passengersCount,
-            passengerNames: passengerNamesInput
-              .split(",")
-              .map((n) => n.trim())
-              .filter(Boolean),
-            passengerPhone: passengerPhone.trim(),
-            vehicleCategory,
-            hasCargo,
-            cargoDescription: hasCargo ? cargoDescription.trim() : null,
-            origin: originPoint,
-            stops: stopPoints,
-            destination: destPoint,
-            legs,
-            roundTrip,
-            scheduledAt: isImmediate
-              ? new Date().toISOString()
-              : new Date(scheduledDateTime).toISOString(),
-            isImmediate,
-            estimatedDistanceKm: effectiveChargedDistance,
-            estimatedDurationMinutes: totalRideTimeMinutes,
-            tariffApplied: {
-              category: vehicleCategory,
-              ratePerKm: effectiveRate,
-              minFare: Number((effectiveMinDistance * effectiveRate).toFixed(2)),
-              baseDistanceKm: effectiveMinDistance,
-              baseAmount: baseFareAmount,
-              taxRate: effectiveTaxRate,
-              taxLabel: effectiveTaxLabel,
-              taxAmount,
-              calculatedAmount: totalWithTax,
-            },
-            fareBreakdown: serverFareBreakdown
-              ? {
-                  ...serverFareBreakdown,
-                  baseAmount: baseFareAmount,
-                  taxRate: effectiveTaxRate,
-                  taxLabel: effectiveTaxLabel,
-                  taxAmount,
-                  totalAmount: totalWithTax,
-                }
-              : fallbackBreakdown,
-            baseAmount: baseFareAmount,
-            taxAmount,
-            taxRate: effectiveTaxRate,
-            finalAmount: totalWithTax,
-            status: "requested",
-            notes: notes.trim() || null,
-            createdAt: serverTimestamp(),
-            updatedAt: serverTimestamp(),
-          });
-        } catch (mirrorErr) {
-          console.warn("[PortalB2B] b2bRequests mirror write skipped:", mirrorErr);
-        }
-      }
+      // CF-48 / CF-75: La reserva ha sido creada atómicamente por el backend (createScheduledTrip o createTrip)
+      // D-01 / D-23: NINGUNA escritura directa de cliente a b2bRequests (reglas allow write: if false)
+      toast.success(
+        isImmediate
+          ? `¡Viaje inmediato solicitado exitosamente! (ID: ${createdTripId})`
+          : `¡Reserva programada confirmada exitosamente! (ID: ${createdScheduledTripId || createdTripId})`
+      );
 
       router.push("/");
     } catch (err: any) {
@@ -852,55 +785,6 @@ export default function NuevaSolicitudPortalB2BPage() {
                   <span className="text-xs font-semibold text-[#2A3547]">
                     Punto de Origen <span className="text-[#FA896B]">*</span>
                   </span>
-                  <div className="relative">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setOpenOriginHubs(!openOriginHubs);
-                        setOpenDestHubs(false);
-                        setOpenStopHubsIdx(null);
-                      }}
-                      className="text-[11px] font-semibold text-[#5D87FF] bg-[#ECF2FF] hover:bg-[#DFE5EF] px-2 py-0.5 rounded-[5px] flex items-center space-x-1 transition cursor-pointer"
-                    >
-                      <Building className="w-3 h-3" />
-                      <span>Hubs frecuentes SV</span>
-                      <ChevronDown className="w-3 h-3" />
-                    </button>
-                    {openOriginHubs && (
-                      <div className="absolute right-0 top-full mt-1 w-80 bg-white rounded-[8px] shadow-xl border border-[#DFE5EF] z-30 py-1.5 max-h-64 overflow-y-auto">
-                        <div className="px-3 py-1 text-[10px] font-bold text-[#7C8FAC] uppercase tracking-wide border-b border-[#E5EAEF] mb-1">
-                          Puntos Corporativos Frecuentes (SV)
-                        </div>
-                        {EL_SALVADOR_LOCATIONS.map((loc, i) => (
-                          <button
-                            key={i}
-                            type="button"
-                            onClick={() => {
-                              setOriginCoord({
-                                address: loc.address,
-                                lat: loc.lat,
-                                lng: loc.lng,
-                              });
-                              setOpenOriginHubs(false);
-                            }}
-                            className={`w-full text-left px-3 py-1.5 text-xs flex flex-col transition cursor-pointer ${
-                              originCoord.address === loc.address
-                                ? "bg-[#ECF2FF] text-[#5D87FF]"
-                                : "hover:bg-[#F2F6FA] text-[#2A3547]"
-                            }`}
-                          >
-                            <span className="font-bold flex items-center space-x-1.5">
-                              <MapPin className="w-3 h-3 text-[#5D87FF] shrink-0" />
-                              <span className="truncate">{loc.label}</span>
-                            </span>
-                            <span className="text-[10px] text-[#7C8FAC] truncate pl-4.5">
-                              {loc.address}
-                            </span>
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                  </div>
                 </div>
 
                 <GoogleAddressAutocomplete
@@ -1023,55 +907,6 @@ export default function NuevaSolicitudPortalB2BPage() {
                   <span className="text-xs font-semibold text-[#2A3547]">
                     Punto de Destino <span className="text-[#FA896B]">*</span>
                   </span>
-                  <div className="relative">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setOpenDestHubs(!openDestHubs);
-                        setOpenOriginHubs(false);
-                        setOpenStopHubsIdx(null);
-                      }}
-                      className="text-[11px] font-semibold text-[#5D87FF] bg-[#ECF2FF] hover:bg-[#DFE5EF] px-2 py-0.5 rounded-[5px] flex items-center space-x-1 transition cursor-pointer"
-                    >
-                      <Building className="w-3 h-3" />
-                      <span>Hubs frecuentes SV</span>
-                      <ChevronDown className="w-3 h-3" />
-                    </button>
-                    {openDestHubs && (
-                      <div className="absolute right-0 top-full mt-1 w-80 bg-white rounded-[8px] shadow-xl border border-[#DFE5EF] z-30 py-1.5 max-h-64 overflow-y-auto">
-                        <div className="px-3 py-1 text-[10px] font-bold text-[#7C8FAC] uppercase tracking-wide border-b border-[#E5EAEF] mb-1">
-                          Puntos Corporativos Frecuentes (SV)
-                        </div>
-                        {EL_SALVADOR_LOCATIONS.map((loc, i) => (
-                          <button
-                            key={i}
-                            type="button"
-                            onClick={() => {
-                              setDestinationCoord({
-                                address: loc.address,
-                                lat: loc.lat,
-                                lng: loc.lng,
-                              });
-                              setOpenDestHubs(false);
-                            }}
-                            className={`w-full text-left px-3 py-1.5 text-xs flex flex-col transition cursor-pointer ${
-                              destinationCoord.address === loc.address
-                                ? "bg-[#ECF2FF] text-[#5D87FF]"
-                                : "hover:bg-[#F2F6FA] text-[#2A3547]"
-                            }`}
-                          >
-                            <span className="font-bold flex items-center space-x-1.5">
-                              <MapPin className="w-3 h-3 text-[#5D87FF] shrink-0" />
-                              <span className="truncate">{loc.label}</span>
-                            </span>
-                            <span className="text-[10px] text-[#7C8FAC] truncate pl-4.5">
-                              {loc.address}
-                            </span>
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                  </div>
                 </div>
 
                 <GoogleAddressAutocomplete
