@@ -811,41 +811,16 @@ export default function CorporatePortalPage() {
       const target = requests.find((r) => r.id === reqId);
       const schedId = (target as any)?.scheduledTripId || target?.tripId;
       if (schedId && !target?.isImmediate) {
-        try {
-          await cancelScheduledTripCallable({ scheduledTripId: schedId });
-        } catch (schedErr) {
-          console.warn(
-            "[PortalB2B] cancelScheduledTripCallable fallback:",
-            schedErr
-          );
-          if (target?.tripId) {
-            try {
-              await cancelCompanyReservationCallable({ tripId: target.tripId });
-            } catch {
-              // ignore
-            }
-          }
-        }
+        await cancelScheduledTripCallable({ scheduledTripId: schedId });
       } else if (target?.tripId) {
-        try {
-          await cancelCompanyReservationCallable({ tripId: target.tripId });
-        } catch (callableErr) {
-          console.warn(
-            "[PortalB2B] cancelCompanyReservationCallable fallback:",
-            callableErr
-          );
-        }
+        await cancelCompanyReservationCallable({ tripId: target.tripId });
       }
-      await updateDoc(doc(db, "b2bRequests", reqId), {
-        status: "cancelled",
-        updatedAt: serverTimestamp(),
-      });
       toast.success("Solicitud cancelada y cupo liberado.");
       setSelectedRequest(null);
       await reloadAdminData();
-    } catch (err) {
+    } catch (err: any) {
       console.error("Error cancelando solicitud:", err);
-      toast.error("No se pudo cancelar la solicitud.");
+      toast.error(err?.message || "No se pudo cancelar la solicitud.");
     }
   };
 
