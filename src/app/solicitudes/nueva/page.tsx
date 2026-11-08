@@ -156,9 +156,19 @@ export default function NuevaSolicitudPortalB2BPage() {
 
   useEffect(() => {
     if (!loading && !user) {
-      router.push("/login");
+      const timer = setTimeout(() => {
+        if (typeof window !== "undefined") {
+          router.replace("/login");
+        }
+      }, 100);
+      return () => clearTimeout(timer);
     } else if (!loading && mustChangePassword) {
-      router.push("/");
+      const timer = setTimeout(() => {
+        if (typeof window !== "undefined") {
+          router.replace("/");
+        }
+      }, 100);
+      return () => clearTimeout(timer);
     }
   }, [user, loading, mustChangePassword, router]);
 

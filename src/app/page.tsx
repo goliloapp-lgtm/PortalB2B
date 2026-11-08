@@ -229,7 +229,12 @@ export default function CorporatePortalPage() {
 
   useEffect(() => {
     if (!loading && !user) {
-      router.push("/login");
+      const timer = setTimeout(() => {
+        if (typeof window !== "undefined") {
+          router.replace("/login");
+        }
+      }, 100);
+      return () => clearTimeout(timer);
     }
   }, [user, loading, router]);
 
@@ -838,7 +843,18 @@ export default function CorporatePortalPage() {
     );
   }
 
-  if (!user) return null;
+  if (!user) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-[#F2F6FA]">
+        <div className="flex flex-col items-center space-y-3">
+          <div className="w-8 h-8 border-2 border-[#5D87FF] border-t-transparent rounded-full animate-spin"></div>
+          <p className="text-xs text-[#5A6A85] font-medium">
+            Redirigiendo a inicio de sesión...
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   const handleMandatoryPasswordSubmit = async (e: React.FormEvent) => {
     e.preventDefault();

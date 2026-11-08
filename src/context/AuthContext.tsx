@@ -59,7 +59,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
   useEffect(() => {
     let unsubscribeCompany: (() => void) | null = null;
 
+    const safetyTimer = setTimeout(() => {
+      setLoading(false);
+    }, 2500);
+
     const unsubscribeAuth = onAuthStateChanged(auth, async (currentUser) => {
+      clearTimeout(safetyTimer);
       if (unsubscribeCompany) {
         unsubscribeCompany();
         unsubscribeCompany = null;
@@ -74,19 +79,34 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
       }
 
       try {
-        // 1. Refrescar ID token para obtener custom claims sincronizados (companyId, companyRole, countryIds)
-        await currentUser.getIdToken(true);
-        let tokenResult = await currentUser.getIdTokenResult();
+        const withTimeout = <T,>(p: Promise<T>, ms = 2500): Promise<T> =>
+          Promise.race([
+            p,
+            new Promise<T>((_, reject) =>
+              setTimeout(() => reject(new Error("Timeout")), ms)
+            ),
+          ]);
 
-        // 2. Leer users/{uid} (siempre permitido por isOwner(uid) en firestore.rules)
-        const userDocSnap = await getDoc(doc(db, "users", currentUser.uid));
-        const userData = userDocSnap.exists() ? userDocSnap.data() : undefined;
+        // 1. Obtener ID token y claims (rápido sin forzar red a menos que no existan)
+        let tokenResult = await withTimeout(currentUser.getIdTokenResult()).catch(() => null);
+        if (!tokenResult?.claims?.companyId) {
+          await withTimeout(currentUser.getIdToken(true)).catch(() => {});
+          tokenResult = await withTimeout(currentUser.getIdTokenResult()).catch(() => null);
+        }
 
-        // CF-39: mustChangePassword y changeProvisionalPassword retirados; la clave se fija en /establecer-clave
+        // 2. Leer users/{uid}
+        let userData: Record<string, any> | undefined;
+        try {
+          const userDocSnap = await withTimeout(getDoc(doc(db, "users", currentUser.uid)), 2000);
+          userData = userDocSnap.exists() ? userDocSnap.data() : undefined;
+        } catch {
+          // fallback silencioso
+        }
+
         setMustChangePassword(false);
 
         const rawRole = (
-          tokenResult.claims.companyRole ||
+          tokenResult?.claims?.companyRole ||
           userData?.companyRole ||
           ""
         )
@@ -100,8 +120,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
         }
         setCompanyRole(resolvedRole);
 
-        const claimCountryIds = Array.isArray(tokenResult.claims.countryIds)
-          ? (tokenResult.claims.countryIds as string[])
+        const claimCountryIds = Array.isArray(tokenResult?.claims?.countryIds)
+          ? (tokenResult!.claims.countryIds as string[])
           : [];
         const targetCountryId =
           claimCountryIds.length > 0 && typeof claimCountryIds[0] === "string"
@@ -117,21 +137,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
             ? userData.companyId.trim()
             : "";
         const claimCompanyId =
-          typeof tokenResult.claims.companyId === "string" &&
+          typeof tokenResult?.claims?.companyId === "string" &&
           tokenResult.claims.companyId.trim() !== ""
             ? tokenResult.claims.companyId.trim()
             : "";
 
         const targetCompanyId = claimCompanyId || docCompanyId;
 
-        // CF-09 / CF-20: Si users/{uid} ya tiene companyId pero el claim aún no estaba en el token, 1 reintento tras pausa corta
-        if (docCompanyId && claimCompanyId !== docCompanyId) {
-          await new Promise((r) => setTimeout(r, 600));
-          await currentUser.getIdToken(true);
-          tokenResult = await currentUser.getIdTokenResult();
-        }
-
         if (targetCompanyId) {
+          const snapTimer = setTimeout(() => {
+            setLoading(false);
+          }, 1500);
+
           unsubscribeCompany = onSnapshot(
             doc(
               db,
@@ -141,6 +158,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
               targetCompanyId
             ),
             (docSnap) => {
+              clearTimeout(snapTimer);
               if (docSnap.exists()) {
                 const compData = docSnap.data();
                 setCompany({
@@ -158,6 +176,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
               setLoading(false);
             },
             (err) => {
+              clearTimeout(snapTimer);
               console.warn(
                 `[Portal Auth] No se pudo suscribir a countries/${targetCountryId}/b2bCompanies/${targetCompanyId}:`,
                 err?.message || err
@@ -175,6 +194,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
     });
 
     return () => {
+      clearTimeout(safetyTimer);
       unsubscribeAuth();
       if (unsubscribeCompany) unsubscribeCompany();
     };
