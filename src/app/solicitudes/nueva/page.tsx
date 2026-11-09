@@ -53,6 +53,7 @@ import {
 import GoogleAddressAutocomplete from "@/components/maps/GoogleAddressAutocomplete";
 import GoogleRouteMap from "@/components/maps/GoogleRouteMap";
 import { useLanguage } from "@/context/LanguageContext";
+import { formatFriendlyError } from "@/lib/friendlyError";
 import {
   ArrowLeft,
   Plus,
@@ -69,7 +70,8 @@ import {
 } from "lucide-react";
 
 export const getMinReservationDateTime = (hours = B2B_RESERVATION_CONFIG.minAdvanceHours) => {
-  const target = new Date(Date.now() + hours * 60 * 60 * 1000);
+  // Se agregan 15 minutos de margen para evitar que el reloj alcance la hora mínima mientras se llena el formulario
+  const target = new Date(Date.now() + hours * 60 * 60 * 1000 + 15 * 60 * 1000);
   const pad = (n: number) => String(n).padStart(2, "0");
   return `${target.getFullYear()}-${pad(target.getMonth() + 1)}-${pad(target.getDate())}T${pad(target.getHours())}:${pad(target.getMinutes())}`;
 };
@@ -104,10 +106,12 @@ export default function NuevaSolicitudPortalB2BPage() {
     lat: number;
     lng: number;
     address: string;
+    isVerified?: boolean;
   }>({
     lat: EL_SALVADOR_LOCATIONS[0].lat,
     lng: EL_SALVADOR_LOCATIONS[0].lng,
     address: EL_SALVADOR_LOCATIONS[0].address,
+    isVerified: true,
   });
 
   const [destinationIndex, setDestinationIndex] = useState<number>(10);
@@ -115,14 +119,22 @@ export default function NuevaSolicitudPortalB2BPage() {
     lat: number;
     lng: number;
     address: string;
+    isVerified?: boolean;
   }>({
     lat: EL_SALVADOR_LOCATIONS[10].lat,
     lng: EL_SALVADOR_LOCATIONS[10].lng,
     address: EL_SALVADOR_LOCATIONS[10].address,
+    isVerified: true,
   });
 
   const [stops, setStops] = useState<
-    Array<{ presetIndex: number; address: string; lat: number; lng: number }>
+    Array<{
+      presetIndex: number;
+      address: string;
+      lat: number;
+      lng: number;
+      isVerified?: boolean;
+    }>
   >([]);
   const [googleDistanceKm, setGoogleDistanceKm] = useState<number | null>(null);
   const [googleDurationMinutes, setGoogleDurationMinutes] = useState<number | null>(null);
@@ -366,12 +378,13 @@ export default function NuevaSolicitudPortalB2BPage() {
   }, [allowedCategories, vehicleCategory]);
 
   const oneWayDistanceKm = useMemo(() => {
+    if (!originCoord.lat || !destinationCoord.lat) return 0;
     if (googleDistanceKm && googleDistanceKm > 0) {
       return roundTrip ? Number((googleDistanceKm / 2).toFixed(1)) : googleDistanceKm;
     }
     const pts = [
       { lat: originCoord.lat, lng: originCoord.lng },
-      ...stops.map((s) => ({ lat: s.lat, lng: s.lng })),
+      ...stops.filter((s) => s.lat && s.lng).map((s) => ({ lat: s.lat, lng: s.lng })),
       { lat: destinationCoord.lat, lng: destinationCoord.lng },
     ];
     return calculateMultiStopRouteDistanceKm(pts);
@@ -404,9 +417,10 @@ export default function NuevaSolicitudPortalB2BPage() {
 
   // Construir tramos (legs) reales a partir de los puntos de la ruta
   const routeLegs = useMemo<TripLegInput[]>(() => {
+    if (!originCoord.lat || !destinationCoord.lat) return [];
     const waypoints = [
       { lat: originCoord.lat, lng: originCoord.lng },
-      ...stops.map((s) => ({ lat: s.lat, lng: s.lng })),
+      ...stops.filter((s) => s.lat && s.lng).map((s) => ({ lat: s.lat, lng: s.lng })),
       { lat: destinationCoord.lat, lng: destinationCoord.lng },
     ];
     if (roundTrip) {
@@ -448,7 +462,10 @@ export default function NuevaSolicitudPortalB2BPage() {
 
   // Consultar cotización oficial en el backend (getFareQuote — CF-38)
   useEffect(() => {
-    if (!user || routeLegs.length === 0) return;
+    if (!user || routeLegs.length === 0) {
+      setServerQuote(null);
+      return;
+    }
     let active = true;
     getFareQuoteCallable({ legs: routeLegs, categoryId: backendCategoryId })
       .then((res) => {
@@ -501,6 +518,7 @@ export default function NuevaSolicitudPortalB2BPage() {
         address: EL_SALVADOR_LOCATIONS[3].address,
         lat: EL_SALVADOR_LOCATIONS[3].lat,
         lng: EL_SALVADOR_LOCATIONS[3].lng,
+        isVerified: true,
       },
     ]);
   };
@@ -508,28 +526,69 @@ export default function NuevaSolicitudPortalB2BPage() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (passengersCount > MAX_VEHICLE_PASSENGER_CAPACITY) {
-      setError(
-        isEn
-          ? "For trips with more than 12 passengers, please contact us by WhatsApp or phone and we will gladly assist you immediately.\nWe are at your service."
-          : "Para viajes de más de 12 pasajeros, contáctenos por WhatsApp o llamada y con gusto le ayudaremos de inmediato.\nEstamos para servirle."
-      );
+      const msg =
+        "Para viajes de más de 12 pasajeros, por favor contáctanos por WhatsApp o teléfono y con gusto te atenderemos de inmediato.";
+      setError(msg);
+      toast.error(msg);
       return;
     }
+
+    let effectiveScheduledIso = new Date(scheduledDateTime).toISOString();
     if (!isImmediate) {
       const scheduledMs = new Date(scheduledDateTime).getTime();
-      const minRequiredMs =
-        Date.now() + advanceHours * 60 * 60 * 1000 - 60000;
-      if (isNaN(scheduledMs) || scheduledMs < minRequiredMs) {
-        setError(
-          isEn
-            ? `Reservations must be booked at least ${advanceHours} hours in advance.`
-            : `Las reservas de viaje deben programarse con un mínimo de ${advanceHours} horas de anticipación.`
-        );
+      const strictMinMs = Date.now() + advanceHours * 60 * 60 * 1000 + 2 * 60 * 1000;
+      const graceWindowMs = Date.now() + (advanceHours * 60 - 20) * 60 * 1000;
+
+      if (isNaN(scheduledMs) || scheduledMs < graceWindowMs) {
+        const msg = `La hora de salida elegida es muy próxima. Por política de tu empresa, las reservas deben programarse con al menos ${advanceHours} horas de anticipación.`;
+        const nextValid = getMinReservationDateTime(advanceHours);
+        setScheduledDateTime(nextValid);
+        setError(msg);
+        toast.error(msg);
         return;
       }
+
+      // Si el usuario dejó la hora por defecto y transcurrieron algunos minutos llenando el formulario, ajustamos automáticamente
+      if (scheduledMs < strictMinMs) {
+        const adjusted = new Date(Date.now() + (advanceHours * 60 + 5) * 60 * 1000);
+        effectiveScheduledIso = adjusted.toISOString();
+      }
     }
-    if (!originCoord.address.trim() || !destinationCoord.address.trim()) {
-      setError("Completa la dirección de origen y destino.");
+
+    if (
+      !originCoord.address.trim() ||
+      originCoord.isVerified === false ||
+      !originCoord.lat ||
+      !originCoord.lng
+    ) {
+      const msg =
+        "Por favor selecciona una dirección real de la lista desplegable de Google Maps para el Punto de Origen.";
+      setError(msg);
+      toast.error(msg);
+      return;
+    }
+
+    if (
+      !destinationCoord.address.trim() ||
+      destinationCoord.isVerified === false ||
+      !destinationCoord.lat ||
+      !destinationCoord.lng
+    ) {
+      const msg =
+        "Por favor selecciona una dirección real de la lista desplegable de Google Maps para el Punto de Destino.";
+      setError(msg);
+      toast.error(msg);
+      return;
+    }
+
+    const unverifiedStop = stops.find(
+      (s) => !s.address.trim() || s.isVerified === false || !s.lat || !s.lng
+    );
+    if (unverifiedStop) {
+      const msg =
+        "Por favor selecciona una dirección real de la lista desplegable de Google Maps para todas las paradas intermedias.";
+      setError(msg);
+      toast.error(msg);
       return;
     }
 
@@ -554,7 +613,7 @@ export default function NuevaSolicitudPortalB2BPage() {
 
       if (costCenters.length > 1 && !costCenterId) {
         throw new Error(
-          `La empresa tiene ${costCenters.length} centros de costo activos. Debes seleccionar uno obligatoriamente.`
+          "Por favor selecciona el departamento o centro de costo al que corresponde este traslado."
         );
       }
       const selectedCC =
@@ -592,7 +651,7 @@ export default function NuevaSolicitudPortalB2BPage() {
 
       if (!resolvedTraveller?.id) {
         throw new Error(
-          "Selecciona un viajero corporativo registrado o pide al Administrador de Empresa dar de alta uno en la pestaña Viajeros."
+          "Por favor selecciona un pasajero corporativo o solicita al administrador de tu empresa registrarlo en el directorio."
         );
       }
 
@@ -619,7 +678,7 @@ export default function NuevaSolicitudPortalB2BPage() {
           const scheduledRes = await createScheduledTripCallable({
             travellerId: resolvedTraveller.id,
             passengerCount: passengersCount,
-            scheduledPickupAt: new Date(scheduledDateTime).toISOString(),
+            scheduledPickupAt: effectiveScheduledIso,
             originAddress: originPoint.address,
             originLatitude: originPoint.lat,
             originLongitude: originPoint.lng,
@@ -657,18 +716,11 @@ export default function NuevaSolicitudPortalB2BPage() {
           serverFareBreakdown = res.data?.fareBreakdown;
         }
       } catch (callableErr: any) {
-        const msg = String(callableErr?.message || "");
-        if (
-          msg.includes("resource-exhausted") ||
-          msg.includes("budget") ||
-          msg.includes("ceiling")
-        ) {
-          throw new Error(
-            "El centro de costo de la empresa ha alcanzado su techo de consumo para este periodo."
-          );
-        }
         throw new Error(
-          msg || "No se pudo registrar la reserva en el servidor B2B."
+          formatFriendlyError(
+            callableErr,
+            "No pudimos registrar tu reserva en este momento. Por favor revisa los datos e intenta de nuevo."
+          )
         );
       }
 
@@ -708,15 +760,46 @@ export default function NuevaSolicitudPortalB2BPage() {
 
       // CF-48 / CF-75: La reserva ha sido creada atómicamente por el backend (createScheduledTrip o createTrip)
       // D-01 / D-23: NINGUNA escritura directa de cliente a b2bRequests (reglas allow write: if false)
+      const targetRideId = createdScheduledTripId || createdTripId;
+      if (typeof window !== "undefined" && targetRideId) {
+        await fetch("/api/b2b/trip-status", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            tripId: targetRideId,
+            status: "requested",
+            companyId: company?.id,
+            passengerName: resolvedTraveller.fullName || resolvedTraveller.name,
+            passengerPhone: resolvedTraveller.phone,
+            origin: {
+              address: originPoint.address,
+              latitude: originPoint.lat,
+              longitude: originPoint.lng,
+            },
+            destination: {
+              address: destPoint.address,
+              latitude: destPoint.lat,
+              longitude: destPoint.lng,
+            },
+            farePrice: totalWithTax,
+          }),
+        }).catch(() => {});
+      }
+
       toast.success(
         isImmediate
-          ? `¡Viaje inmediato solicitado exitosamente! (ID: ${createdTripId})`
-          : `¡Reserva programada confirmada exitosamente! (ID: ${createdScheduledTripId || createdTripId})`
+          ? "¡Tu solicitud de traslado inmediato fue recibida! En breve te asignaremos un conductor."
+          : "¡Tu reserva de traslado ha sido confirmada con éxito! Podrás seguir su estado en tiempo real."
       );
 
       router.push("/");
     } catch (err: any) {
-      setError(err.message || "Error al registrar la solicitud.");
+      const friendlyMsg = formatFriendlyError(
+        err,
+        "No pudimos registrar tu solicitud de traslado. Por favor intenta nuevamente."
+      );
+      setError(friendlyMsg);
+      toast.error(friendlyMsg);
     } finally {
       setSubmitting(false);
     }
@@ -761,14 +844,16 @@ export default function NuevaSolicitudPortalB2BPage() {
           </button>
         </div>
 
-        {error && (
-          <div className="p-4 bg-[#FDEDE8] text-[#FA896B] rounded-[7px] text-xs font-semibold">
-            {error}
-          </div>
-        )}
-
         <form
           onSubmit={handleSubmit}
+          onKeyDown={(e) => {
+            if (
+              e.key === "Enter" &&
+              (e.target as HTMLElement)?.tagName === "INPUT"
+            ) {
+              e.preventDefault();
+            }
+          }}
           className="grid grid-cols-1 lg:grid-cols-3 gap-6"
         >
           {/* Formulario Principal */}
@@ -800,12 +885,14 @@ export default function NuevaSolicitudPortalB2BPage() {
                 <GoogleAddressAutocomplete
                   placeholder="Buscar dirección o punto de interés (ej. WTC, Sheraton, Hilton, Calle El Mirador...)"
                   value={originCoord.address}
+                  isVerified={originCoord.isVerified}
                   required
                   onChange={(sel) => {
                     setOriginCoord({
                       address: sel.address,
                       lat: sel.lat,
                       lng: sel.lng,
+                      isVerified: Boolean(sel.isVerified),
                     });
                   }}
                 />
@@ -854,6 +941,7 @@ export default function NuevaSolicitudPortalB2BPage() {
                                             address: loc.address,
                                             lat: loc.lat,
                                             lng: loc.lng,
+                                            isVerified: true,
                                           }
                                         : item
                                     )
@@ -893,6 +981,7 @@ export default function NuevaSolicitudPortalB2BPage() {
                   <GoogleAddressAutocomplete
                     placeholder="Buscar punto intermedio en El Salvador..."
                     value={st.address}
+                    isVerified={st.isVerified}
                     onChange={(sel) => {
                       setStops((prev) =>
                         prev.map((item, i) =>
@@ -902,6 +991,7 @@ export default function NuevaSolicitudPortalB2BPage() {
                                 address: sel.address,
                                 lat: sel.lat,
                                 lng: sel.lng,
+                                isVerified: Boolean(sel.isVerified),
                               }
                             : item
                         )
@@ -922,12 +1012,14 @@ export default function NuevaSolicitudPortalB2BPage() {
                 <GoogleAddressAutocomplete
                   placeholder="Buscar destino en El Salvador (ej. Aeropuerto Comalapa, Zona Franca, Hotel...)"
                   value={destinationCoord.address}
+                  isVerified={destinationCoord.isVerified}
                   required
                   onChange={(sel) => {
                     setDestinationCoord({
                       address: sel.address,
                       lat: sel.lat,
                       lng: sel.lng,
+                      isVerified: Boolean(sel.isVerified),
                     });
                   }}
                 />
@@ -940,7 +1032,7 @@ export default function NuevaSolicitudPortalB2BPage() {
                     <MapPin className="w-3.5 h-3.5 text-[#5D87FF]" />
                     <span>Ruta Vial y Tiempo Estimado en Vivo (Google Maps API SV)</span>
                   </span>
-                  {googleDistanceKm !== null && (
+                  {googleDistanceKm !== null && googleDistanceKm > 0 && (
                     <span className="text-[11px] font-semibold text-[#13DEB9]">
                       Calculado por DirectionsService
                     </span>
@@ -953,8 +1045,8 @@ export default function NuevaSolicitudPortalB2BPage() {
                   roundTrip={roundTrip}
                   height="260px"
                   onRouteCalculated={({ distanceKm, durationMinutes }) => {
-                    setGoogleDistanceKm(distanceKm);
-                    setGoogleDurationMinutes(durationMinutes);
+                    setGoogleDistanceKm(distanceKm > 0 ? distanceKm : null);
+                    setGoogleDurationMinutes(durationMinutes > 0 ? durationMinutes : null);
                   }}
                 />
               </div>
@@ -996,7 +1088,6 @@ export default function NuevaSolicitudPortalB2BPage() {
                     <span className="text-xs font-semibold text-[#2A3547]">Fecha y Hora de Salida *:</span>
                     <input
                       type="datetime-local"
-                      min={getMinReservationDateTime(advanceHours)}
                       value={scheduledDateTime}
                       onChange={(e) => setScheduledDateTime(e.target.value)}
                       className="text-xs border border-[#DFE5EF] rounded-[6px] px-2.5 py-2 font-medium"

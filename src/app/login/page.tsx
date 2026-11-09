@@ -10,6 +10,7 @@ import {
   verifyPasswordResetCodeAndUpdatePasswordCallable,
 } from "@/lib/firebase";
 import { useAuth } from "@/context/AuthContext";
+import { formatFriendlyError } from "@/lib/friendlyError";
 import {
   Lock,
   Mail,
@@ -48,17 +49,16 @@ export default function LoginPage() {
     try {
       setLoading(true);
       await signIn(email, password);
-      toast.success("Bienvenido al Portal Corporativo Lilo B2B");
+      toast.success("¡Bienvenido al Portal Corporativo Lilo B2B!");
       router.push("/");
     } catch (err: any) {
       console.error(err);
-      if (err.code === "auth/invalid-credential" || err.code === "auth/wrong-password") {
-        toast.error("Credenciales incorrectas");
-      } else if (err.code === "auth/user-not-found") {
-        toast.error("Usuario no registrado en Firebase Auth");
-      } else {
-        toast.error("Error al iniciar sesión: " + (err.message || ""));
-      }
+      toast.error(
+        formatFriendlyError(
+          err,
+          "No pudimos iniciar sesión. Verifica tu correo electrónico y contraseña."
+        )
+      );
     } finally {
       setLoading(false);
     }
@@ -69,7 +69,7 @@ export default function LoginPage() {
     e.preventDefault();
     const targetEmail = resetEmail.trim().toLowerCase();
     if (!targetEmail) {
-      toast.error("Ingresa tu correo electrónico corporativo");
+      toast.error("Por favor ingresa tu correo electrónico corporativo.");
       return;
     }
     setResetLoading(true);
@@ -89,12 +89,15 @@ export default function LoginPage() {
       try {
         await sendPasswordResetEmail(auth, targetEmail);
         toast.success(
-          "Se envió un enlace de restablecimiento de contraseña a tu correo."
+          "Te enviamos un enlace a tu correo para restablecer tu contraseña."
         );
         setForgotMode("none");
       } catch (fbErr: any) {
         toast.error(
-          "No se pudo enviar el código: " + (fbErr?.message || err?.message || "")
+          formatFriendlyError(
+            fbErr || err,
+            "No pudimos enviar el código de recuperación. Verifica tu correo electrónico."
+          )
         );
       }
     } finally {
@@ -106,15 +109,15 @@ export default function LoginPage() {
     e.preventDefault();
     const targetEmail = resetEmail.trim().toLowerCase();
     if (!resetCode.trim() || resetCode.trim().length < 6) {
-      toast.error("Ingresa el código de verificación de 6 dígitos");
+      toast.error("Por favor ingresa el código de verificación de 6 dígitos.");
       return;
     }
     if (newPassword.length < 8) {
-      toast.error("La nueva contraseña debe tener al menos 8 caracteres");
+      toast.error("La nueva contraseña debe tener al menos 8 caracteres.");
       return;
     }
     if (newPassword !== confirmNewPassword) {
-      toast.error("Las contraseñas no coinciden");
+      toast.error("Las contraseñas ingresadas no coinciden.");
       return;
     }
 
@@ -126,7 +129,7 @@ export default function LoginPage() {
         newPassword,
       });
       toast.success(
-        "Contraseña actualizada exitosamente. Iniciando sesión..."
+        "¡Tu contraseña ha sido actualizada con éxito! Iniciando sesión..."
       );
       setEmail(targetEmail);
       setPassword(newPassword);
@@ -134,7 +137,10 @@ export default function LoginPage() {
       router.push("/");
     } catch (err: any) {
       toast.error(
-        "Código inválido o expirado: " + (err?.message || "Verifica el código")
+        formatFriendlyError(
+          err,
+          "El código ingresado no es válido o ya venció. Solicita uno nuevo."
+        )
       );
     } finally {
       setResetLoading(false);

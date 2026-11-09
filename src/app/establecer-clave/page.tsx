@@ -4,6 +4,8 @@ import React, { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { verifyPasswordResetCode, confirmPasswordReset } from "firebase/auth";
 import { auth } from "@/lib/firebase";
+import { formatFriendlyError } from "@/lib/friendlyError";
+import toast from "react-hot-toast";
 import {
   Lock,
   CheckCircle2,
@@ -27,9 +29,10 @@ function EstablecerClaveContent() {
 
   useEffect(() => {
     if (!oobCode) {
-      setError(
-        "El enlace no contiene un código de activación válido (oobCode). Solicite un nuevo enlace desde la pantalla de inicio de sesión."
-      );
+      const msg =
+        "El enlace de invitación no es válido o está incompleto. Por favor solicita uno nuevo desde la pantalla de inicio de sesión.";
+      setError(msg);
+      toast.error(msg);
       setVerifying(false);
       return;
     }
@@ -44,9 +47,10 @@ function EstablecerClaveContent() {
       })
       .catch(() => {
         if (active) {
-          setError(
-            "El enlace para establecer contraseña ha expirado o ya fue utilizado."
-          );
+          const msg =
+            "Este enlace de activación ya venció o ya fue utilizado anteriormente.";
+          setError(msg);
+          toast.error(msg);
           setVerifying(false);
         }
       });
@@ -61,11 +65,15 @@ function EstablecerClaveContent() {
     setError("");
 
     if (newPassword.length < 8) {
-      setError("La contraseña debe tener al menos 8 caracteres.");
+      const msg = "La contraseña debe tener al menos 8 caracteres.";
+      setError(msg);
+      toast.error(msg);
       return;
     }
     if (newPassword !== confirmPassword) {
-      setError("Las contraseñas no coinciden.");
+      const msg = "Las contraseñas ingresadas no coinciden.";
+      setError(msg);
+      toast.error(msg);
       return;
     }
 
@@ -73,14 +81,17 @@ function EstablecerClaveContent() {
     try {
       await confirmPasswordReset(auth, oobCode, newPassword);
       setSuccess(true);
+      toast.success("¡Contraseña configurada con éxito! Ya puedes iniciar sesión.");
       setTimeout(() => {
         router.push("/login");
       }, 2200);
     } catch (err: any) {
-      setError(
-        err?.message ||
-          "No fue posible establecer la contraseña. Intente nuevamente."
+      const friendly = formatFriendlyError(
+        err,
+        "No fue posible guardar tu nueva contraseña. Por favor intenta nuevamente."
       );
+      setError(friendly);
+      toast.error(friendly);
     } finally {
       setSubmitting(false);
     }

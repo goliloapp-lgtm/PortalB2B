@@ -2,7 +2,7 @@
 
 import React, { useEffect, useRef, useState } from "react";
 import { loadGoogleMapsScript } from "@/lib/googleMaps";
-import { MapPin, Search, X, Loader2 } from "lucide-react";
+import { MapPin, X, Loader2 } from "lucide-react";
 
 export interface AddressSelection {
   address: string;
@@ -10,10 +10,12 @@ export interface AddressSelection {
   lng: number;
   placeId?: string;
   name?: string;
+  isVerified?: boolean;
 }
 
 interface Props {
   value: string;
+  isVerified?: boolean;
   placeholder?: string;
   label?: string;
   required?: boolean;
@@ -24,6 +26,7 @@ interface Props {
 
 export default function GoogleAddressAutocomplete({
   value,
+  isVerified,
   placeholder = "Buscar dirección o punto de referencia en El Salvador...",
   label,
   required = false,
@@ -33,13 +36,24 @@ export default function GoogleAddressAutocomplete({
 }: Props) {
   const inputRef = useRef<HTMLInputElement>(null);
   const autocompleteRef = useRef<google.maps.places.Autocomplete | null>(null);
+  const onChangeRef = useRef(onChange);
+  onChangeRef.current = onChange;
+
   const [inputValue, setInputValue] = useState(value || "");
-  const [isLoaded, setIsLoaded] = useState(false);
+  const [confirmed, setConfirmed] = useState<boolean>(
+    isVerified !== undefined ? isVerified : Boolean(value && value.trim())
+  );
   const [isLoading, setIsLoading] = useState(false);
 
   useEffect(() => {
     setInputValue(value || "");
   }, [value]);
+
+  useEffect(() => {
+    if (isVerified !== undefined) {
+      setConfirmed(isVerified);
+    }
+  }, [isVerified]);
 
   useEffect(() => {
     let active = true;
@@ -48,7 +62,6 @@ export default function GoogleAddressAutocomplete({
     loadGoogleMapsScript()
       .then((g) => {
         if (!active || !inputRef.current) return;
-        setIsLoaded(true);
         setIsLoading(false);
 
         // Crear Autocomplete con restricción a El Salvador (SV)
@@ -69,12 +82,14 @@ export default function GoogleAddressAutocomplete({
           const lng = place.geometry.location.lng();
 
           setInputValue(selectedAddress);
-          onChange({
+          setConfirmed(true);
+          onChangeRef.current({
             address: selectedAddress,
             lat,
             lng,
             placeId: place.place_id,
             name: place.name,
+            isVerified: true,
           });
         });
 
@@ -93,28 +108,41 @@ export default function GoogleAddressAutocomplete({
         google.maps.event.clearInstanceListeners(autocompleteRef.current);
       }
     };
-  }, [onChange]);
+  }, []);
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const newVal = e.target.value;
     setInputValue(newVal);
-    // Transmitir cambio manual si no se selecciona del dropdown
-    onChange({
+    setConfirmed(false);
+    onChangeRef.current({
       address: newVal,
-      lat: 13.6929,
-      lng: -89.2182,
+      lat: 0,
+      lng: 0,
+      isVerified: false,
     });
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter") {
+      // Evitar que presionar Enter al elegir una sugerencia de Google Places envíe el formulario
+      e.preventDefault();
+      e.stopPropagation();
+    }
   };
 
   const handleClear = () => {
     setInputValue("");
+    setConfirmed(false);
     if (inputRef.current) inputRef.current.value = "";
-    onChange({
+    onChangeRef.current({
       address: "",
-      lat: 13.6929,
-      lng: -89.2182,
+      lat: 0,
+      lng: 0,
+      isVerified: false,
     });
   };
+
+  const showUnverifiedWarning = Boolean(inputValue.trim().length > 0 && !confirmed);
 
   return (
     <div className={`space-y-1 ${className}`}>
@@ -124,16 +152,25 @@ export default function GoogleAddressAutocomplete({
         </label>
       )}
       <div className="relative flex items-center">
-        <MapPin className="w-4 h-4 text-[#5D87FF] absolute left-3 pointer-events-none" />
+        <MapPin
+          className={`w-4 h-4 absolute left-3 pointer-events-none ${
+            showUnverifiedWarning ? "text-[#D97706]" : "text-[#5D87FF]"
+          }`}
+        />
         <input
           ref={inputRef}
           type="text"
           value={inputValue}
           onChange={handleInputChange}
+          onKeyDown={handleKeyDown}
           placeholder={placeholder}
           required={required}
           disabled={disabled}
-          className="w-full pl-9 pr-9 py-2 text-xs rounded-[7px] border border-[#DFE5EF] focus:outline-none focus:border-[#5D87FF] focus:ring-1 focus:ring-[#5D87FF] text-[#2A3547] placeholder-[#7C8FAC] bg-white transition disabled:bg-gray-50"
+          className={`w-full pl-9 pr-9 py-2 text-xs rounded-[7px] border focus:outline-none focus:ring-1 text-[#2A3547] placeholder-[#7C8FAC] bg-white transition disabled:bg-gray-50 ${
+            showUnverifiedWarning
+              ? "border-[#FFAE1F] focus:border-[#D97706] focus:ring-[#FFAE1F]"
+              : "border-[#DFE5EF] focus:border-[#5D87FF] focus:ring-[#5D87FF]"
+          }`}
         />
         {isLoading && (
           <Loader2 className="w-4 h-4 text-[#7C8FAC] absolute right-3 animate-spin pointer-events-none" />
@@ -149,6 +186,11 @@ export default function GoogleAddressAutocomplete({
           </button>
         )}
       </div>
+      {showUnverifiedWarning && (
+        <p className="text-[11px] font-medium text-[#D97706]">
+          Selecciona una sugerencia de la lista desplegable de Google Maps para validar la dirección.
+        </p>
+      )}
     </div>
   );
 }

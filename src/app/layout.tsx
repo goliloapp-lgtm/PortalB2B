@@ -31,13 +31,18 @@ export default function RootLayout({
         <LanguageProvider>
           <AuthProvider>
             <Toaster
-              position="top-right"
+              position="top-center"
               toastOptions={{
+                duration: 4500,
                 style: {
-                  borderRadius: "7px",
+                  borderRadius: "10px",
                   border: "1px solid #E5EAEF",
                   color: "#2A3547",
                   fontSize: "13px",
+                  fontWeight: 600,
+                  padding: "12px 16px",
+                  maxWidth: "520px",
+                  boxShadow: "0 10px 25px -5px rgba(15, 23, 42, 0.12)",
                 },
               }}
             />

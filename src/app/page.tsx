@@ -52,6 +52,7 @@ import { useAuth } from "@/context/AuthContext";
 import { useLanguage } from "@/context/LanguageContext";
 import { B2BRequestStatus, B2BServiceRequest, CostCenter } from "@/types/b2b";
 import GoogleTripTrackingMap from "@/components/maps/GoogleTripTrackingMap";
+import { formatFriendlyError } from "@/lib/friendlyError";
 import {
   Wallet,
   Phone,
@@ -149,11 +150,13 @@ const STATUS_LABELS: Record<
 
 const LIFECYCLE_STEPS: Array<{ status: B2BRequestStatus; label: string }> = [
   { status: "requested", label: "Solicitada" },
-  { status: "seeking_driver", label: "Búsqueda / Reasignación" },
+  { status: "seeking_driver", label: "Buscando Conductor" },
+  { status: "confirmed", label: "Confirmada" },
   { status: "assigned", label: "Conductor Asignado" },
   { status: "enRoute", label: "En Camino al Origen" },
   { status: "driverArrived", label: "Conductor en Punto" },
-  { status: "inService", label: "En Curso" },
+  { status: "inService", label: "En Curso (Viajando)" },
+  { status: "arrived", label: "Llegada a Destino" },
   { status: "completed", label: "Completado" },
 ];
 
@@ -176,7 +179,23 @@ export default function CorporatePortalPage() {
   const [confirmPasswordInput, setConfirmPasswordInput] = useState("");
   const [updatingPassword, setUpdatingPassword] = useState(false);
 
-  const [requests, setRequests] = useState<B2BServiceRequest[]>([]);
+  const [rawRequests, setRawRequests] = useState<B2BServiceRequest[]>([]);
+  const [companyTrips, setCompanyTrips] = useState<any[]>([]);
+  const [rtdbRidesMap, setRtdbRidesMap] = useState<Record<string, any>>({});
+  const [vehiclesMap, setVehiclesMap] = useState<Record<string, any>>({});
+  const [operationalStatusMap, setOperationalStatusMap] = useState<
+    Record<string, B2BRequestStatus>
+  >({});
+
+  const setOperationalStatus = (id: string, status: B2BRequestStatus) => {
+    if (!id) return;
+    setOperationalStatusMap((prev) =>
+      prev[id] === status ? prev : { ...prev, [id]: status }
+    );
+  };
+
+  const [searchTerm, setSearchTerm] = useState("");
+  const [statusFilter, setStatusFilter] = useState<string>("all");
   const [costCenters, setCostCenters] = useState<CostCenter[]>([]);
   const [editingLimitMap, setEditingLimitMap] = useState<Record<string, string>>(
     {}
@@ -238,15 +257,43 @@ export default function CorporatePortalPage() {
     }
   }, [user, loading, router]);
 
+  const fetchCompanyTripsAndScheduled = async () => {
+    if (!user || !company?.id) return;
+    try {
+      const [schedRes, tripsRes] = await Promise.allSettled([
+        listCompanyScheduledTripsCallable({ limit: 50 }),
+        listCompanyTripsCallable({ limit: 50 }),
+      ]);
+      if (
+        schedRes.status === "fulfilled" &&
+        Array.isArray(schedRes.value.data?.scheduledTrips)
+      ) {
+        setScheduledTrips(schedRes.value.data.scheduledTrips);
+      }
+      if (
+        tripsRes.status === "fulfilled" &&
+        Array.isArray(tripsRes.value.data?.trips)
+      ) {
+        setCompanyTrips(tripsRes.value.data.trips);
+      }
+    } catch {
+      // Silencio en polling
+    } finally {
+      setLoadingRequests(false);
+    }
+  };
+
   const reloadAdminData = async () => {
-    if (!user || !company?.id || !isCompanyAdmin) return;
+    if (!user || !company?.id) return;
+    void fetchCompanyTripsAndScheduled();
+    if (!isCompanyAdmin) return;
     try {
       const [summaryRes, ratesRes, ccRes, travRes, schedRes, ccReqRes] = await Promise.allSettled([
         getCompanyPeriodSummaryCallable(),
         listCompanyRatesCallable(),
         listCostCentresCallable(),
         listTravellersCallable(),
-        listCompanyScheduledTripsCallable(),
+        listCompanyScheduledTripsCallable({ limit: 50 }),
         listCostCentreRequestsCallable(),
       ]);
       if (summaryRes.status === "fulfilled" && summaryRes.value.data) {
@@ -284,6 +331,13 @@ export default function CorporatePortalPage() {
 
   useEffect(() => {
     reloadAdminData();
+    const timer = setInterval(fetchCompanyTripsAndScheduled, 15000);
+    const onFocus = () => void fetchCompanyTripsAndScheduled();
+    window.addEventListener("focus", onFocus);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener("focus", onFocus);
+    };
   }, [user, company?.id, isCompanyAdmin]);
 
   useEffect(() => {
@@ -378,22 +432,7 @@ export default function CorporatePortalPage() {
         const list = snapshot.docs.map(
           (d) => ({ id: d.id, ...d.data() } as B2BServiceRequest)
         );
-
-        list.sort((a, b) => {
-          const tA =
-            (a.createdAt as any)?.toMillis?.() ||
-            ((a.createdAt as any)?.seconds
-              ? (a.createdAt as any).seconds * 1000
-              : Date.parse(String(a.scheduledAt || "")) || 0);
-          const tB =
-            (b.createdAt as any)?.toMillis?.() ||
-            ((b.createdAt as any)?.seconds
-              ? (b.createdAt as any).seconds * 1000
-              : Date.parse(String(b.scheduledAt || "")) || 0);
-          return tB - tA;
-        });
-
-        setRequests(list);
+        setRawRequests(list);
         setLoadingRequests(false);
       },
       (err) => {
@@ -405,11 +444,321 @@ export default function CorporatePortalPage() {
     return () => unsubscribe();
   }, [user, company?.id, loading]);
 
+  // Sincronización global en tiempo real con Firebase Realtime Database (`/api/b2b/trip-status?all=1`)
+  useEffect(() => {
+    if (!user) return;
+    let isMounted = true;
+
+    const syncAllRidesFromRtdb = async () => {
+      try {
+        const res = await fetch("/api/b2b/trip-status?all=1");
+        if (!res.ok || !isMounted) return;
+        const payload = await res.json();
+        if (payload?.rides) {
+          setRtdbRidesMap(payload.rides);
+          setOperationalStatusMap((prev) => {
+            let changed = false;
+            const next = { ...prev };
+            for (const [rId, rInfo] of Object.entries<any>(payload.rides)) {
+              const b2bSt = rInfo?.mappedB2BStatus as B2BRequestStatus | undefined;
+              if (b2bSt && next[rId] !== b2bSt) {
+                next[rId] = b2bSt;
+                changed = true;
+              }
+            }
+            return changed ? next : prev;
+          });
+        }
+        if (payload?.vehicles) {
+          setVehiclesMap(payload.vehicles);
+        }
+      } catch {
+        // Silencio en polling de red
+      }
+    };
+
+    void syncAllRidesFromRtdb();
+    const timer = setInterval(syncAllRidesFromRtdb, 2500);
+    return () => {
+      isMounted = false;
+      clearInterval(timer);
+    };
+  }, [user]);
+
+  const normalizeStatus = (status: string): B2BRequestStatus => {
+    if (status === "driver_assigned" || status === "assigned") return "assigned";
+    if (status === "available" || status === "offered" || status === "seeking_driver") return "seeking_driver";
+    if (status === "dispatched" || status === "enRoute" || status === "accepted") return "enRoute";
+    if (status === "in_progress" || status === "inService") return "inService";
+    if (status === "driverArrived" || status === "driver_arrived") return "driverArrived";
+    if (status === "arrived") return "arrived";
+    if (status === "completed") return "completed";
+    if (status === "cancelled") return "cancelled";
+    if (status === "rejected") return "rejected";
+    return (status as B2BRequestStatus) || "requested";
+  };
+
+  const getLifecycleStepIndex = (status: string): number => {
+    const norm = normalizeStatus(status);
+    const idx = LIFECYCLE_STEPS.findIndex((s) => s.status === norm);
+    if (norm === "invoiced") return LIFECYCLE_STEPS.length;
+    return idx >= 0 ? idx : 0;
+  };
+
+  const mappedScheduledRequests = useMemo<B2BServiceRequest[]>(() => {
+    return scheduledTrips.map((st) => {
+      const liveTrip = companyTrips.find(
+        (t) => t.tripId === st.scheduledTripId
+      );
+      const rtdbRide = rtdbRidesMap[st.scheduledTripId];
+      const effectiveRawStatus =
+        rtdbRide?.mappedB2BStatus || liveTrip?.status || st.status;
+      const mappedStatus = normalizeStatus(effectiveRawStatus);
+
+      const vehId = rtdbRide?.vehicleId || st.acceptedVehicleId;
+      const veh = vehId ? vehiclesMap[vehId] : undefined;
+      const cc = costCenters.find(
+        (c) => c.id === (st as any).costCentreId || c.id === (st as any).costCenterId
+      );
+      const trav = travellersList.find((t) => t.travellerId === st.travellerId);
+
+      const isSeeking =
+        mappedStatus === "seeking_driver" || mappedStatus === "requested";
+      const driverId = isSeeking
+        ? undefined
+        : rtdbRide?.driverId || (st as any).driverId || veh?.driverId || undefined;
+      const driverName = isSeeking
+        ? undefined
+        : rtdbRide?.driverName || veh?.driverName || (st as any).driverName || undefined;
+      const driverPhone = isSeeking
+        ? undefined
+        : rtdbRide?.driverPhone || veh?.driverPhone || (st as any).driverPhone || undefined;
+      const vehiclePlate = isSeeking
+        ? undefined
+        : rtdbRide?.vehiclePlate || veh?.plate || (st as any).vehiclePlate || undefined;
+
+      return {
+        id: st.scheduledTripId,
+        tripId: st.scheduledTripId,
+        scheduledTripId: st.scheduledTripId,
+        folio:
+          (st as any).folio ||
+          `B2B-SV-${st.scheduledTripId.slice(0, 6).toUpperCase()}`,
+        countryId: "sv",
+        companyId: company?.id || "",
+        companyName: company?.tradeName || company?.legalName || "Empresa B2B",
+        costCenterId: (st as any).costCentreId || cc?.id || "",
+        costCenterName:
+          (st as any).costCentreName || cc?.name || "General",
+        requestedByUid: user?.uid || "",
+        requestedByName: company?.contactName || "Coordinador Corporativo",
+        travellerId: st.travellerId || "",
+        travellerName:
+          (st as any).travellerName ||
+          trav?.name ||
+          (st.travellerId ? "Viajero Corporativo" : ""),
+        passengersCount:
+          (st as any).passengerCount || (st.categoryId === "microbus" ? 8 : 1),
+        passengerNames: trav?.name ? [trav.name] : [],
+        passengerPhone: trav?.phone || "",
+        vehicleCategory: (
+          st.categoryId === "pickup"
+            ? "pickup"
+            : st.categoryId === "microbus"
+            ? "microbus"
+            : "suv"
+        ) as any,
+        hasCargo: Boolean((st as any).hasCargo),
+        origin: {
+          address: st.originAddress,
+          lat: 13.7086,
+          lng: -89.2408,
+        },
+        stops: [],
+        destination: {
+          address: st.destinationAddress,
+          lat: 13.7,
+          lng: -89.23,
+        },
+        roundTrip: false,
+        legs: [
+          {
+            distance: Number(rtdbRide?.chargedDistance || (st as any).chargedDistance || 15),
+            durationMinutes: 25,
+          },
+        ],
+        scheduledAt: st.scheduledPickupAt,
+        createdAt: rtdbRide?.createdAt || (st as any).createdAt || undefined,
+        isImmediate: false,
+        estimatedDistanceKm: Number(
+          rtdbRide?.chargedDistance || (st as any).chargedDistance || 15
+        ),
+        estimatedDurationMinutes: 25,
+        tariffApplied: {
+          category: (st.categoryId as any) || "suv",
+          ratePerKm: 0.67,
+          minFare: 13.56,
+          baseDistanceKm: 20,
+          calculatedAmount: st.totalAmount,
+        },
+        finalAmount: st.totalAmount,
+        assignedDriverId: driverId,
+        assignedDriverName: driverName,
+        assignedDriverPhone: driverPhone,
+        assignedVehicleId: isSeeking ? undefined : vehId,
+        assignedVehiclePlate: vehiclePlate,
+        status: mappedStatus,
+        notes: rtdbRide?.interruptionReason || undefined,
+        ...(rtdbRide?.startedAt ? { startedAt: rtdbRide.startedAt } : {}),
+        ...(rtdbRide?.interruptionReason
+          ? { interruptionReason: rtdbRide.interruptionReason }
+          : {}),
+      } as B2BServiceRequest;
+    });
+  }, [
+    scheduledTrips,
+    companyTrips,
+    rtdbRidesMap,
+    vehiclesMap,
+    costCenters,
+    travellersList,
+    company?.id,
+    company?.tradeName,
+    company?.legalName,
+    company?.contactName,
+    user?.uid,
+  ]);
+
+  const requests = useMemo<B2BServiceRequest[]>(() => {
+    const list: B2BServiceRequest[] = rawRequests.map((r) => {
+      const targetId = r.tripId || (r as any).scheduledTripId || r.id;
+      const rtdbRide = rtdbRidesMap[targetId] || rtdbRidesMap[r.id];
+      const overrideStatus =
+        operationalStatusMap[targetId] ||
+        operationalStatusMap[r.id] ||
+        (rtdbRide?.mappedB2BStatus as B2BRequestStatus | undefined);
+
+      const resolvedStatus = overrideStatus || r.status;
+      const isSeeking =
+        resolvedStatus === "seeking_driver" || resolvedStatus === "requested";
+      const vehId = rtdbRide?.vehicleId || r.assignedVehicleId;
+      const veh = vehId ? vehiclesMap[vehId] : undefined;
+
+      return {
+        ...r,
+        status: resolvedStatus,
+        assignedDriverId: isSeeking
+          ? undefined
+          : rtdbRide?.driverId || r.assignedDriverId || veh?.driverId,
+        assignedDriverName: isSeeking
+          ? undefined
+          : rtdbRide?.driverName || r.assignedDriverName || veh?.driverName,
+        assignedDriverPhone: isSeeking
+          ? undefined
+          : rtdbRide?.driverPhone || r.assignedDriverPhone || veh?.driverPhone,
+        assignedVehicleId: isSeeking ? undefined : vehId,
+        assignedVehiclePlate: isSeeking
+          ? undefined
+          : rtdbRide?.vehiclePlate || r.assignedVehiclePlate || veh?.plate,
+        notes: rtdbRide?.interruptionReason || r.notes,
+        ...(rtdbRide?.startedAt ? { startedAt: rtdbRide.startedAt } : {}),
+        ...(rtdbRide?.interruptionReason
+          ? { interruptionReason: rtdbRide.interruptionReason }
+          : {}),
+      };
+    });
+
+    for (const sReq of mappedScheduledRequests) {
+      const existingIdx = list.findIndex(
+        (r) =>
+          r.id === sReq.id ||
+          (r as any).scheduledTripId === sReq.id ||
+          r.tripId === sReq.id
+      );
+
+      const overrideStatus =
+        operationalStatusMap[sReq.id] ||
+        (sReq.tripId ? operationalStatusMap[sReq.tripId] : undefined);
+
+      if (existingIdx >= 0) {
+        const currentStatus = overrideStatus || list[existingIdx].status;
+        const currentStep = getLifecycleStepIndex(currentStatus);
+        const scheduledStep = getLifecycleStepIndex(sReq.status);
+        const resolvedStatus =
+          overrideStatus ||
+          (currentStep > scheduledStep ? currentStatus : sReq.status);
+        const isSeeking =
+          resolvedStatus === "seeking_driver" || resolvedStatus === "requested";
+
+        list[existingIdx] = {
+          ...list[existingIdx],
+          ...sReq,
+          status: resolvedStatus,
+          assignedDriverId: isSeeking
+            ? undefined
+            : sReq.assignedDriverId || list[existingIdx].assignedDriverId,
+          assignedDriverName: isSeeking
+            ? undefined
+            : sReq.assignedDriverName || list[existingIdx].assignedDriverName,
+          assignedDriverPhone: isSeeking
+            ? undefined
+            : sReq.assignedDriverPhone || list[existingIdx].assignedDriverPhone,
+          assignedVehicleId: isSeeking
+            ? undefined
+            : sReq.assignedVehicleId || list[existingIdx].assignedVehicleId,
+          assignedVehiclePlate: isSeeking
+            ? undefined
+            : sReq.assignedVehiclePlate || list[existingIdx].assignedVehiclePlate,
+        };
+      } else {
+        list.push({
+          ...sReq,
+          status: overrideStatus || sReq.status,
+        });
+      }
+    }
+
+    const getCreatedTimestamp = (req: B2BServiceRequest): number => {
+      const rtdbC = rtdbRidesMap[req.id]?.createdAt;
+      if (typeof rtdbC === "number" && rtdbC > 0) return rtdbC;
+      if (typeof rtdbC === "string") {
+        const parsed = Date.parse(rtdbC);
+        if (!isNaN(parsed)) return parsed;
+      }
+      const c = req.createdAt as any;
+      if (typeof c === "number" && c > 0) return c;
+      if (typeof c?.toMillis === "function") return c.toMillis();
+      if (typeof c?.seconds === "number") return c.seconds * 1000;
+      if (typeof c === "string") {
+        const parsed = Date.parse(c);
+        if (!isNaN(parsed)) return parsed;
+      }
+      const rtdbUpd = rtdbRidesMap[req.id]?.updatedAt;
+      if (typeof rtdbUpd === "number" && rtdbUpd > 0) return rtdbUpd;
+      return Date.parse(String(req.scheduledAt || "")) || 0;
+    };
+
+    list.sort((a, b) => getCreatedTimestamp(b) - getCreatedTimestamp(a));
+
+    return list;
+  }, [
+    rawRequests,
+    mappedScheduledRequests,
+    rtdbRidesMap,
+    vehiclesMap,
+    operationalStatusMap,
+  ]);
+
   // Mantener sincronizada la solicitud abierta en el modal de monitoreo en vivo
   const liveSelectedRequest = useMemo(() => {
     if (!selectedRequest) return null;
     return (
-      requests.find((r) => r.id === selectedRequest.id) || selectedRequest
+      requests.find(
+        (r) =>
+          r.id === selectedRequest.id ||
+          r.tripId === selectedRequest.id ||
+          (r as any).scheduledTripId === selectedRequest.id
+      ) || selectedRequest
     );
   }, [requests, selectedRequest]);
 
@@ -442,10 +791,21 @@ export default function CorporatePortalPage() {
             lng: typeof val.lng === "number" ? val.lng : val.longitude,
             driverName: val.driverName || val.name,
             speed: typeof val.speed === "number" ? val.speed : undefined,
-            heading: typeof val.heading === "number" ? val.heading : undefined,
+            heading:
+              typeof val.bearing === "number"
+                ? val.bearing
+                : typeof val.heading === "number"
+                ? val.heading
+                : undefined,
             updatedAt: val.updatedAt || val.timestamp || Date.now(),
             status: val.status,
           });
+          if (val.status === "on_trip" && liveSelectedRequest) {
+            setOperationalStatus(liveSelectedRequest.id, "inService");
+            if (liveSelectedRequest.tripId) {
+              setOperationalStatus(liveSelectedRequest.tripId, "inService");
+            }
+          }
         } else {
           setDriverTelemetry(null);
         }
@@ -456,7 +816,72 @@ export default function CorporatePortalPage() {
     );
 
     return () => unsubscribeRtdb();
-  }, [liveSelectedRequest?.assignedDriverId]);
+  }, [liveSelectedRequest?.assignedDriverId, liveSelectedRequest?.id, liveSelectedRequest?.tripId]);
+
+  // CF-65: Sincronización continua del traslado abierto con Realtime Database (`/api/b2b/trip-status`)
+  useEffect(() => {
+    const targetRideId =
+      liveSelectedRequest?.tripId ||
+      (liveSelectedRequest as any)?.scheduledTripId ||
+      liveSelectedRequest?.id;
+
+    if (!targetRideId || !liveSelectedRequest) return;
+
+    let isMounted = true;
+    const syncSelectedTripRtdb = async () => {
+      try {
+        const res = await fetch(
+          `/api/b2b/trip-status?tripId=${encodeURIComponent(targetRideId)}`
+        );
+        if (!res.ok || !isMounted) return;
+        const data = await res.json();
+        if (data.exists && isMounted) {
+          if (data.driverTelemetry?.lat && data.driverTelemetry?.lng) {
+            setDriverTelemetry((prev) => ({
+              ...(prev || {}),
+              ...data.driverTelemetry,
+            }));
+          }
+          const mappedB2BStatus = data.mappedB2BStatus as
+            | B2BRequestStatus
+            | undefined;
+          if (mappedB2BStatus) {
+            setOperationalStatus(targetRideId, mappedB2BStatus);
+            setOperationalStatus(liveSelectedRequest.id, mappedB2BStatus);
+            if (liveSelectedRequest.tripId) {
+              setOperationalStatus(liveSelectedRequest.tripId, mappedB2BStatus);
+            }
+          }
+          if (data.data) {
+            setRtdbRidesMap((prev) => ({
+              ...prev,
+              [targetRideId]: {
+                ...(prev[targetRideId] || {}),
+                ...data.data,
+                mappedB2BStatus: mappedB2BStatus || prev[targetRideId]?.mappedB2BStatus,
+                interruptionReason:
+                  data.interruptionReason || prev[targetRideId]?.interruptionReason,
+                startedAt: data.startedAt || prev[targetRideId]?.startedAt,
+              },
+            }));
+          }
+        }
+      } catch {
+        // Silencio en polling de red
+      }
+    };
+
+    void syncSelectedTripRtdb();
+    const timer = setInterval(syncSelectedTripRtdb, 2000);
+    return () => {
+      isMounted = false;
+      clearInterval(timer);
+    };
+  }, [
+    liveSelectedRequest?.id,
+    liveSelectedRequest?.tripId,
+    (liveSelectedRequest as any)?.scheduledTripId,
+  ]);
 
   const filteredRequests = useMemo(() => {
     const now = Date.now();
@@ -466,17 +891,34 @@ export default function CorporatePortalPage() {
         : periodFilter === "month"
         ? 30 * 24 * 60 * 60 * 1000
         : Infinity;
+    const q = searchTerm.trim().toLowerCase();
 
     return requests.filter((r) => {
-      if (cutoff === Infinity) return true;
-      const ts =
-        (r.createdAt as any)?.toMillis?.() ||
-        ((r.createdAt as any)?.seconds
-          ? (r.createdAt as any).seconds * 1000
-          : Date.parse(String(r.scheduledAt || "")) || now);
-      return now - ts <= cutoff;
+      if (cutoff !== Infinity) {
+        const ts =
+          (r.createdAt as any)?.toMillis?.() ||
+          ((r.createdAt as any)?.seconds
+            ? (r.createdAt as any).seconds * 1000
+            : Date.parse(String(r.scheduledAt || "")) || now);
+        if (now - ts > cutoff) return false;
+      }
+      if (statusFilter !== "all" && r.status !== statusFilter) {
+        return false;
+      }
+      if (q) {
+        const matchesSearch =
+          (r.folio || "").toLowerCase().includes(q) ||
+          (r.costCenterName || "").toLowerCase().includes(q) ||
+          (r.travellerName || "").toLowerCase().includes(q) ||
+          (r.origin?.address || "").toLowerCase().includes(q) ||
+          (r.destination?.address || "").toLowerCase().includes(q) ||
+          (r.assignedDriverName || "").toLowerCase().includes(q) ||
+          (r.assignedVehiclePlate || "").toLowerCase().includes(q);
+        if (!matchesSearch) return false;
+      }
+      return true;
     });
-  }, [requests, periodFilter]);
+  }, [requests, periodFilter, statusFilter, searchTerm]);
 
   const kpis = useMemo(() => {
     const activeStatuses = [
@@ -523,20 +965,28 @@ export default function CorporatePortalPage() {
   useEffect(() => {
     const targetTripId =
       liveSelectedRequest?.tripId ||
-      (liveSelectedRequest as any)?.scheduledTripId;
+      (liveSelectedRequest as any)?.scheduledTripId ||
+      liveSelectedRequest?.id;
     if (!targetTripId || !user) {
       setTripEvents([]);
       setTripIncidents([]);
       return;
     }
-    listTripEventsCallable({ tripId: targetTripId, limit: 25 })
-      .then((res) => setTripEvents(res.data?.events || []))
-      .catch(() => setTripEvents([]));
+    const fetchEventsAndIncidents = () => {
+      listTripEventsCallable({ tripId: targetTripId, limit: 25 })
+        .then((res) => setTripEvents(res.data?.events || []))
+        .catch(() => {});
 
-    listTripIncidentsCallable({ tripId: targetTripId, limit: 20 })
-      .then((res) => setTripIncidents(res.data?.incidents || []))
-      .catch(() => setTripIncidents([]));
+      listTripIncidentsCallable({ tripId: targetTripId, limit: 20 })
+        .then((res) => setTripIncidents(res.data?.incidents || []))
+        .catch(() => {});
+    };
+
+    fetchEventsAndIncidents();
+    const timer = setInterval(fetchEventsAndIncidents, 4000);
+    return () => clearInterval(timer);
   }, [
+    liveSelectedRequest?.id,
     liveSelectedRequest?.tripId,
     (liveSelectedRequest as any)?.scheduledTripId,
     user,
@@ -558,14 +1008,17 @@ export default function CorporatePortalPage() {
       });
       toast.success(
         normalizedLimit === null
-          ? "Techo eliminado (Sin límite)"
-          : `Techo actualizado a $${normalizedLimit.toFixed(2)} USD`
+          ? "Se eliminó el límite de presupuesto (Sin límite)."
+          : `Límite de presupuesto actualizado a $${normalizedLimit.toFixed(2)} USD.`
       );
       await reloadAdminData();
     } catch (err: any) {
       console.error("Error actualizando techo de consumo:", err);
       toast.error(
-        err?.message || "No se pudo actualizar el techo de consumo."
+        formatFriendlyError(
+          err,
+          "No pudimos actualizar el límite de presupuesto en este momento."
+        )
       );
     } finally {
       setSavingLimitId(null);
@@ -575,7 +1028,7 @@ export default function CorporatePortalPage() {
   const handleRequestNewCostCentre = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!proposedCCName.trim()) {
-      toast.error("Ingresa el nombre del centro propuesto.");
+      toast.error("Por favor ingresa el nombre del nuevo departamento.");
       return;
     }
     setRequestingCC(true);
@@ -591,10 +1044,15 @@ export default function CorporatePortalPage() {
       setProposedCCName("");
       setProposedCCBudget("");
       setShowRequestCCModal(false);
-      toast.success("Solicitud enviada a plataforma para su aprobación.");
+      toast.success("Tu solicitud de nuevo departamento fue enviada para aprobación.");
       await reloadAdminData();
     } catch (err: any) {
-      toast.error(err?.message || "No se pudo solicitar el centro de costo.");
+      toast.error(
+        formatFriendlyError(
+          err,
+          "No pudimos enviar la solicitud del departamento en este momento."
+        )
+      );
     } finally {
       setRequestingCC(false);
     }
@@ -603,7 +1061,7 @@ export default function CorporatePortalPage() {
   const handleCreateTraveller = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newTravName.trim()) {
-      toast.error("Ingresa el nombre del viajero corporativo.");
+      toast.error("Por favor ingresa el nombre completo del pasajero.");
       return;
     }
     setCreatingTraveller(true);
@@ -614,14 +1072,19 @@ export default function CorporatePortalPage() {
         documentNumber: newTravDoc.trim() || undefined,
         email: newTravEmail.trim() || undefined,
       });
-      toast.success("Viajero corporativo creado correctamente");
+      toast.success("Pasajero corporativo agregado correctamente al directorio.");
       setNewTravName("");
       setNewTravPhone("+503 ");
       setNewTravDoc("");
       setNewTravEmail("");
       await reloadAdminData();
     } catch (err: any) {
-      toast.error(err?.message || "Error al crear viajero.");
+      toast.error(
+        formatFriendlyError(
+          err,
+          "No pudimos registrar al pasajero. Verifica los datos e intenta de nuevo."
+        )
+      );
     } finally {
       setCreatingTraveller(false);
     }
@@ -634,11 +1097,15 @@ export default function CorporatePortalPage() {
         active: !trav.active,
       });
       toast.success(
-        !trav.active ? "Viajero reactivado" : "Viajero retirado (inactivo)"
+        !trav.active
+          ? "El pasajero ha sido reactivado en el directorio."
+          : "El pasajero ha sido marcado como inactivo."
       );
       await reloadAdminData();
     } catch (err: any) {
-      toast.error(err?.message || "No se pudo actualizar el viajero.");
+      toast.error(
+        formatFriendlyError(err, "No pudimos actualizar el estado del pasajero.")
+      );
     }
   };
 
@@ -646,11 +1113,11 @@ export default function CorporatePortalPage() {
   const handleInviteUser = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!inviteEmail.trim() || !inviteEmail.includes("@")) {
-      toast.error("Ingresa un correo electrónico corporativo válido.");
+      toast.error("Por favor ingresa un correo electrónico válido.");
       return;
     }
     if (!company?.id) {
-      toast.error("No se pudo identificar la empresa actual.");
+      toast.error("No pudimos identificar tu empresa. Recarga la página e intenta de nuevo.");
       return;
     }
     setInvitingUser(true);
@@ -690,7 +1157,7 @@ export default function CorporatePortalPage() {
       });
 
       toast.success(
-        `Invitación enviada a ${normalizedEmail}. El colaborador recibirá un enlace oficial para establecer su contraseña.`
+        `Invitación enviada a ${normalizedEmail}. Recibirá un correo para crear su contraseña.`
       );
       setInviteEmail("");
       setInviteFirstName("");
@@ -699,7 +1166,12 @@ export default function CorporatePortalPage() {
       setShowInviteUserModal(false);
     } catch (err: any) {
       console.error("[handleInviteUser] Error:", err);
-      toast.error(err?.message || "Error al invitar al colaborador.");
+      toast.error(
+        formatFriendlyError(
+          err,
+          "No pudimos enviar la invitación al colaborador. Verifica su correo e intenta de nuevo."
+        )
+      );
     } finally {
       setInvitingUser(false);
     }
@@ -728,11 +1200,13 @@ export default function CorporatePortalPage() {
       });
       toast.success(
         newStatus
-          ? "Colaborador reactivado exitosamente."
-          : "Colaborador desactivado exitosamente."
+          ? "La cuenta del colaborador fue reactivada."
+          : "La cuenta del colaborador fue desactivada."
       );
     } catch (err: any) {
-      toast.error(err?.message || "No se pudo actualizar el estado de la cuenta.");
+      toast.error(
+        formatFriendlyError(err, "No pudimos cambiar el estado del colaborador.")
+      );
     } finally {
       setUpdatingUserId(null);
     }
@@ -763,12 +1237,14 @@ export default function CorporatePortalPage() {
         return updated;
       });
       toast.success(
-        `Rol actualizado a ${
+        `El permiso del colaborador cambió a ${
           newRole === "company_admin" ? "Administrador de Empresa" : "Operador"
         }.`
       );
     } catch (err: any) {
-      toast.error(err?.message || "No se pudo actualizar el rol del colaborador.");
+      toast.error(
+        formatFriendlyError(err, "No pudimos actualizar el permiso del colaborador.")
+      );
     } finally {
       setUpdatingUserId(null);
     }
@@ -780,11 +1256,13 @@ export default function CorporatePortalPage() {
       liveSelectedRequest?.tripId ||
       (liveSelectedRequest as any)?.scheduledTripId;
     if (!targetTripId) {
-      toast.error("Esta solicitud aún no tiene ID de viaje en el servidor.");
+      toast.error(
+        "Este traslado aún se está procesando. Intenta reportar el inconveniente en unos segundos."
+      );
       return;
     }
     if (!incidentDesc.trim()) {
-      toast.error("Describe la incidencia.");
+      toast.error("Por favor escribe una breve descripción de lo ocurrido.");
       return;
     }
     setReportingIncident(true);
@@ -795,7 +1273,7 @@ export default function CorporatePortalPage() {
         severity: incidentSeverity,
         description: incidentDesc.trim(),
       });
-      toast.success("Incidencia registrada en el servidor.");
+      toast.success("Tu reporte fue enviado al equipo de operaciones de Lilo.");
       setIncidentDesc("");
       setShowIncidentForm(false);
       const incRes = await listTripIncidentsCallable({
@@ -804,7 +1282,9 @@ export default function CorporatePortalPage() {
       });
       setTripIncidents(incRes.data?.incidents || []);
     } catch (err: any) {
-      toast.error(err?.message || "No se pudo registrar la incidencia.");
+      toast.error(
+        formatFriendlyError(err, "No pudimos enviar tu reporte en este momento.")
+      );
     } finally {
       setReportingIncident(false);
     }
@@ -815,17 +1295,33 @@ export default function CorporatePortalPage() {
     try {
       const target = requests.find((r) => r.id === reqId);
       const schedId = (target as any)?.scheduledTripId || target?.tripId;
+      const targetRideId = target?.tripId || schedId || reqId;
       if (schedId && !target?.isImmediate) {
         await cancelScheduledTripCallable({ scheduledTripId: schedId });
       } else if (target?.tripId) {
         await cancelCompanyReservationCallable({ tripId: target.tripId });
       }
-      toast.success("Solicitud cancelada y cupo liberado.");
+      if (typeof window !== "undefined" && targetRideId) {
+        await fetch("/api/b2b/trip-status", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            tripId: targetRideId,
+            status: "cancelled",
+            driverId: target?.assignedDriverId,
+          }),
+        }).catch(() => {});
+      }
+      setOperationalStatus(reqId, "cancelled");
+      if (targetRideId) setOperationalStatus(targetRideId, "cancelled");
+      toast.success("Tu traslado fue cancelado y el saldo ha sido liberado.");
       setSelectedRequest(null);
       await reloadAdminData();
     } catch (err: any) {
       console.error("Error cancelando solicitud:", err);
-      toast.error(err?.message || "No se pudo cancelar la solicitud.");
+      toast.error(
+        formatFriendlyError(err, "No fue posible cancelar el traslado en este momento.")
+      );
     }
   };
 
@@ -875,7 +1371,10 @@ export default function CorporatePortalPage() {
       router.push("/login");
     } catch (err: any) {
       toast.error(
-        "No se pudo actualizar la contraseña: " + (err?.message || "")
+        formatFriendlyError(
+          err,
+          "No pudimos actualizar tu contraseña en este momento. Intenta nuevamente."
+        )
       );
     } finally {
       setUpdatingPassword(false);
@@ -1616,17 +2115,41 @@ export default function CorporatePortalPage() {
 
         {/* Historial Centralizado y Monitoreo en Tiempo Real (H2.3-FE & H2.5-FE) */}
         <div className="modern-card p-6">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-5 pb-3 border-b border-[#E5EAEF]">
+          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 mb-5 pb-3 border-b border-[#E5EAEF]">
             <div>
               <h2 className="text-base font-bold text-[#2A3547]">
-                Solicitudes y Monitoreo de Traslados en Tiempo Real
+                Solicitudes y Monitoreo en Tiempo Real (H2.4 / H2.5)
               </h2>
               <p className="text-xs text-[#7C8FAC]">
-                Haz clic en cualquier traslado para ver la línea de tiempo en vivo, conductor y unidad asignada
+                Seguimiento en vivo conectado a Firebase Realtime Database (Solicitada → Asignada → En Camino → En Punto → En Curso → Completado)
               </p>
             </div>
 
-            <div className="flex items-center space-x-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                type="text"
+                placeholder="Buscar por folio, origen, destino o conductor..."
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                className="text-xs border border-[#DFE5EF] rounded-[6px] px-3 py-2 bg-white text-[#2A3547] min-w-[240px]"
+              />
+
+              <select
+                value={statusFilter}
+                onChange={(e) => setStatusFilter(e.target.value)}
+                className="text-xs border border-[#DFE5EF] rounded-[6px] px-3 py-2 bg-white text-[#2A3547]"
+              >
+                <option value="all">Todos los estados</option>
+                <option value="requested">Solicitada</option>
+                <option value="seeking_driver">Buscando Conductor</option>
+                <option value="assigned">Conductor Asignado</option>
+                <option value="enRoute">En Camino al Origen</option>
+                <option value="driverArrived">Conductor en Punto</option>
+                <option value="inService">En Curso</option>
+                <option value="completed">Completado</option>
+                <option value="cancelled">Cancelado</option>
+              </select>
+
               <select
                 value={periodFilter}
                 onChange={(e) => setPeriodFilter(e.target.value as any)}
@@ -1671,10 +2194,10 @@ export default function CorporatePortalPage() {
               <table className="w-full text-left border-collapse text-xs">
                 <thead>
                   <tr className="border-b border-[#E5EAEF] text-[#5A6A85] uppercase">
-                    <th className="py-3 px-3 font-semibold">Folio</th>
+                    <th className="py-3 px-3 font-semibold">Folio / Modalidad</th>
                     <th className="py-3 px-3 font-semibold">Centro de Costo</th>
-                    <th className="py-3 px-3 font-semibold">Ruta (Origen → Destino)</th>
-                    <th className="py-3 px-3 font-semibold">Unidad / Pax</th>
+                    <th className="py-3 px-3 font-semibold">Ruta & Paradas</th>
+                    <th className="py-3 px-3 font-semibold">Vehículo & Pasajeros</th>
                     <th className="py-3 px-3 font-semibold">Conductor Asignado</th>
                     {isCompanyAdmin && (
                       <th className="py-3 px-3 font-semibold text-right">
@@ -1682,7 +2205,7 @@ export default function CorporatePortalPage() {
                       </th>
                     )}
                     <th className="py-3 px-3 font-semibold text-center">Estado en Vivo</th>
-                    <th className="py-3 px-3 font-semibold text-right">Acción</th>
+                    <th className="py-3 px-3 font-semibold text-right">Monitoreo</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[#E5EAEF]">
@@ -1699,8 +2222,8 @@ export default function CorporatePortalPage() {
                             {req.folio}
                           </span>
                           <span className="text-[11px] text-[#7C8FAC]">
-                            {req.roundTrip ? "Ida y Vuelta" : "Solo Ida"} ·{" "}
-                            {req.estimatedDistanceKm} km
+                            {req.isImmediate ? "Inmediato" : "Programado"} ·{" "}
+                            {req.roundTrip ? "Ida y Vuelta" : "Solo Ida"}
                           </span>
                         </td>
                         <td className="py-3.5 px-3 font-medium text-[#2A3547]">
@@ -1713,7 +2236,7 @@ export default function CorporatePortalPage() {
                         </td>
                         <td className="py-3.5 px-3 max-w-[260px]">
                           <div className="truncate font-medium text-[#2A3547]">
-                            De: {req.origin?.address}
+                            <strong>Origen:</strong> {req.origin?.address}
                           </div>
                           {req.stops && req.stops.length > 0 && (
                             <div className="text-[11px] text-[#5D87FF] font-semibold">
@@ -1721,16 +2244,16 @@ export default function CorporatePortalPage() {
                             </div>
                           )}
                           <div className="truncate text-[#7C8FAC]">
-                            A: {req.destination?.address}
+                            <strong>Destino:</strong> {req.destination?.address}
                           </div>
                         </td>
                         <td className="py-3.5 px-3">
                           <span className="px-2 py-0.5 rounded bg-[#ECF2FF] text-[#5D87FF] font-bold uppercase text-[10px]">
-                            {req.vehicleCategory} · {req.passengersCount} pax
+                            {(req.vehicleCategory || "suv").toUpperCase()} · {req.passengersCount} pax
                           </span>
                           {req.hasCargo && (
                             <span className="block text-[10px] text-[#FFAE1F] font-semibold mt-0.5">
-                              Incluye Carga
+                              Con Carga / Equipaje
                             </span>
                           )}
                         </td>
@@ -1741,23 +2264,33 @@ export default function CorporatePortalPage() {
                                 {req.assignedDriverName}
                               </span>
                               <span className="text-[11px] text-[#7C8FAC]">
-                                Placa: {req.assignedVehiclePlate}
+                                {req.assignedVehiclePlate}
+                                {req.assignedDriverPhone
+                                  ? ` · ${req.assignedDriverPhone}`
+                                  : ""}
                               </span>
                             </div>
                           ) : (
-                            <span className="text-[#FFAE1F] font-medium">
-                              Asignando unidad...
+                            <span className="inline-block px-2 py-0.5 rounded border border-[#FFAE1F]/50 text-[#D97706] text-[11px] font-semibold">
+                              {req.status === "seeking_driver"
+                                ? "Buscando conductor..."
+                                : "Sin asignar"}
                             </span>
                           )}
                         </td>
                         {isCompanyAdmin && (
-                          <td className="py-3.5 px-3 text-right font-bold text-[#2A3547]">
-                            $
-                            {Number(
-                              req.finalAmount ??
-                                req.tariffApplied?.calculatedAmount ??
-                                0
-                            ).toFixed(2)}
+                          <td className="py-3.5 px-3 text-right">
+                            <span className="font-bold text-[#2A3547] block">
+                              $
+                              {Number(
+                                req.finalAmount ??
+                                  req.tariffApplied?.calculatedAmount ??
+                                  0
+                              ).toFixed(2)}
+                            </span>
+                            <span className="text-[10px] text-[#7C8FAC]">
+                              {req.estimatedDistanceKm} km
+                            </span>
                           </td>
                         )}
                         <td className="py-3.5 px-3 text-center">
@@ -1770,7 +2303,7 @@ export default function CorporatePortalPage() {
                         <td className="py-3.5 px-3 text-right">
                           <button
                             onClick={() => setSelectedRequest(req)}
-                            className="inline-flex items-center space-x-1 text-[#5D87FF] hover:underline font-semibold cursor-pointer"
+                            className="inline-flex items-center space-x-1 px-3 py-1.5 border border-[#5D87FF] text-[#5D87FF] hover:bg-[#ECF2FF] rounded-[6px] font-semibold cursor-pointer transition"
                           >
                             <Eye className="w-3.5 h-3.5" />
                             <span>Monitorear</span>
@@ -1834,71 +2367,53 @@ export default function CorporatePortalPage() {
         )}
       </main>
 
-      {/* Modal de Monitoreo en Tiempo Real (H2.5-FE) */}
+      {/* Drawer Lateral de Monitoreo en Tiempo Real (Idéntico al Dashboard Administrativo · H2.5-FE) */}
       {liveSelectedRequest && (
-        <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4">
-          <div className="bg-white rounded-[10px] max-w-lg w-full p-6 shadow-xl space-y-5 max-h-[90vh] overflow-y-auto">
+        <div
+          className="fixed inset-0 z-50 bg-black/40 flex justify-end"
+          onClick={() => setSelectedRequest(null)}
+        >
+          <div
+            className="bg-white w-full max-w-[520px] h-full p-6 shadow-2xl space-y-5 overflow-y-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
             <div className="flex items-start justify-between border-b border-[#E5EAEF] pb-3">
               <div>
-                <span className="text-[11px] font-bold uppercase text-[#5D87FF]">
-                  Monitoreo en Tiempo Real
-                </span>
-                <h3 className="text-lg font-bold text-[#2A3547]">
+                <h3 className="text-xl font-bold text-[#2A3547]">
                   {liveSelectedRequest.folio}
                 </h3>
                 <p className="text-xs text-[#7C8FAC]">
-                  Centro de Costo: {liveSelectedRequest.costCenterName || "General"}
+                  {company?.tradeName || liveSelectedRequest.companyName} · CC:{" "}
+                  {liveSelectedRequest.costCenterName || "General"}
                 </p>
               </div>
-              <button
-                onClick={() => setSelectedRequest(null)}
-                className="text-xs text-[#7C8FAC] hover:text-[#2A3547] font-semibold"
-              >
-                Cerrar ✕
-              </button>
-            </div>
-
-            {/* Línea de Tiempo de Estados en Vivo */}
-            <div className="bg-[#F8FAFC] p-4 rounded-[8px] border border-[#E5EAEF] space-y-2.5">
-              <span className="text-xs font-bold text-[#2A3547] block mb-2">
-                Progreso del Servicio en Vivo
-              </span>
-              {LIFECYCLE_STEPS.map((st, idx) => {
-                const currentIdx = LIFECYCLE_STEPS.findIndex(
-                  (s) => s.status === liveSelectedRequest.status
-                );
-                const isDone =
-                  liveSelectedRequest.status === "completed" ||
-                  liveSelectedRequest.status === "invoiced" ||
-                  (currentIdx >= 0 && idx <= currentIdx);
-                return (
-                  <div key={st.status} className="flex items-center space-x-2.5">
-                    <div
-                      className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold ${
-                        isDone
-                          ? "bg-[#13DEB9] text-white"
-                          : "bg-[#E5EAEF] text-[#7C8FAC]"
-                      }`}
-                    >
-                      {isDone ? "✓" : idx + 1}
-                    </div>
+              <div className="flex items-center space-x-2">
+                {(() => {
+                  const badge =
+                    STATUS_LABELS[liveSelectedRequest.status] ||
+                    STATUS_LABELS.requested;
+                  return (
                     <span
-                      className={`text-xs ${
-                        isDone
-                          ? "font-bold text-[#2A3547]"
-                          : "text-[#7C8FAC]"
-                      }`}
+                      className={`inline-flex px-2.5 py-1 rounded-[5px] text-[11px] font-bold ${badge.bg} ${badge.text}`}
                     >
-                      {st.label}
+                      {badge.label}
                     </span>
-                  </div>
-                );
-              })}
+                  );
+                })()}
+                <button
+                  onClick={() => setSelectedRequest(null)}
+                  className="text-xs text-[#7C8FAC] hover:text-[#2A3547] font-bold px-2 py-1"
+                >
+                  ✕
+                </button>
+              </div>
             </div>
 
-            {/* Información de Conductor y Ruta */}
-            <div className="space-y-3 text-xs">
-              {/* Mapa de Monitoreo en Vivo (Google Maps API + RTDB) */}
+            {/* Mapa de Monitoreo en Vivo (Google Maps API + RTDB) */}
+            <div>
+              <span className="text-xs font-bold text-[#2A3547] block mb-2">
+                Monitoreo en Vivo de Ruta y Unidad (Google Maps API)
+              </span>
               <GoogleTripTrackingMap
                 origin={liveSelectedRequest.origin}
                 destination={liveSelectedRequest.destination}
@@ -1908,7 +2423,73 @@ export default function CorporatePortalPage() {
                 vehiclePlate={liveSelectedRequest.assignedVehiclePlate}
                 height="220px"
               />
+            </div>
 
+            {/* Línea de Tiempo de Estados en Vivo (Sincronizada con Realtime Database) */}
+            <div>
+              <span className="text-xs font-bold text-[#2A3547] block mb-2">
+                Línea de Tiempo en Vivo (Sincronizada con Realtime Database)
+              </span>
+              <div className="bg-[#F8FAFC] p-4 rounded-[8px] border border-[#E5EAEF] space-y-2.5">
+                {LIFECYCLE_STEPS.map((st, idx) => {
+                  const activeStepIdx = getLifecycleStepIndex(
+                    liveSelectedRequest.status
+                  );
+                  const isCompletedStep =
+                    liveSelectedRequest.status === "completed" ||
+                    liveSelectedRequest.status === "invoiced" ||
+                    idx < activeStepIdx;
+                  const isCurrentStep =
+                    liveSelectedRequest.status !== "completed" &&
+                    liveSelectedRequest.status !== "invoiced" &&
+                    idx === activeStepIdx;
+                  return (
+                    <div key={st.status}>
+                      <div className="flex items-center space-x-3">
+                        <div
+                          className={`w-6 h-6 rounded-full flex items-center justify-center text-[11px] font-bold shrink-0 ${
+                            isCompletedStep || isCurrentStep
+                              ? "bg-[#5D87FF] text-white"
+                              : "bg-[#94A3B8] text-white"
+                          }`}
+                        >
+                          {isCompletedStep ? "✓" : idx + 1}
+                        </div>
+                        <span
+                          className={`text-xs ${
+                            isCompletedStep || isCurrentStep
+                              ? "font-bold text-[#2A3547]"
+                              : "text-[#7C8FAC]"
+                          }`}
+                        >
+                          {st.label}
+                        </span>
+                      </div>
+                      {idx < LIFECYCLE_STEPS.length - 1 && (
+                        <div className="ml-3 h-3 w-px bg-[#CBD5E1] my-0.5" />
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {liveSelectedRequest.status === "seeking_driver" &&
+              (liveSelectedRequest.notes ||
+                (liveSelectedRequest as any).interruptionReason) && (
+                <div className="p-3 rounded-[7px] bg-[#FEF5E5] border border-[#FFAE1F]/50 text-xs text-[#92400E]">
+                  <strong className="block mb-0.5">
+                    Incidencia en ruta reportada (CF-87 · Reasignando unidad):
+                  </strong>
+                  <span>
+                    {(liveSelectedRequest as any).interruptionReason ||
+                      liveSelectedRequest.notes}
+                  </span>
+                </div>
+              )}
+
+            {/* Información de Conductor y Ruta */}
+            <div className="space-y-3 text-xs">
               <div className="p-3 rounded-[7px] bg-[#ECF2FF] flex items-center justify-between">
                 <div>
                   <span className="text-[10px] uppercase font-bold text-[#5D87FF] block">
@@ -1920,8 +2501,10 @@ export default function CorporatePortalPage() {
                   </span>
                   {liveSelectedRequest.assignedVehiclePlate && (
                     <span className="block text-[#5A6A85]">
-                      Placa: {liveSelectedRequest.assignedVehiclePlate} · Tel:{" "}
-                      {liveSelectedRequest.assignedDriverPhone}
+                      Placa: {liveSelectedRequest.assignedVehiclePlate}
+                      {liveSelectedRequest.assignedDriverPhone
+                        ? ` · Tel: ${liveSelectedRequest.assignedDriverPhone}`
+                        : ""}
                     </span>
                   )}
                 </div>
@@ -1970,50 +2553,73 @@ export default function CorporatePortalPage() {
                 </div>
               ) : liveSelectedRequest.assignedDriverId ? (
                 <div className="p-2.5 rounded-[7px] bg-[#F8FAFC] border border-[#E5EAEF] text-[11px] text-[#7C8FAC] flex items-center justify-between">
-                  <span>Conectado a Firebase RTDB (esperando fix GPS de conductor...)</span>
+                  <span>Conectado a Firebase RTDB (monitoreando conductor...)</span>
                   <Clock className="w-3.5 h-3.5 animate-spin text-[#7C8FAC]" />
                 </div>
               ) : null}
 
-              <div>
-                <span className="text-[#7C8FAC] font-semibold block">
-                  Origen:
-                </span>
-                <span className="font-bold text-[#2A3547]">
-                  {liveSelectedRequest.origin?.address}
-                </span>
-              </div>
-
-              {liveSelectedRequest.stops &&
-                liveSelectedRequest.stops.length > 0 && (
-                  <div>
-                    <span className="text-[#5D87FF] font-semibold block">
-                      Paradas Intermedias ({liveSelectedRequest.stops.length}):
-                    </span>
-                    {liveSelectedRequest.stops.map((s, i) => (
-                      <span key={i} className="block text-[#2A3547]">
-                        {i + 1}. {s.address}
-                      </span>
-                    ))}
-                  </div>
-                )}
-
-              <div>
-                <span className="text-[#7C8FAC] font-semibold block">
-                  Destino ({liveSelectedRequest.roundTrip ? "Ida y Vuelta" : "Solo Ida"}):
-                </span>
-                <span className="font-bold text-[#2A3547]">
-                  {liveSelectedRequest.destination?.address}
-                </span>
-              </div>
-
-              {isCompanyAdmin && (
-                <div className="pt-2 border-t border-[#E5EAEF] flex items-center justify-between">
-                  <span className="text-[#5A6A85] font-semibold">
-                    Tarifa Oficial Aplicada ({liveSelectedRequest.estimatedDistanceKm} km):
+              <div className="pt-2 border-t border-[#E5EAEF] space-y-2.5">
+                <div>
+                  <span className="text-[10px] uppercase text-[#7C8FAC] font-bold block">
+                    ORIGEN
                   </span>
-                  <span className="text-base font-extrabold text-[#5D87FF]">
-                    $
+                  <span className="font-bold text-[#2A3547]">
+                    {liveSelectedRequest.origin?.address}
+                  </span>
+                </div>
+
+                {liveSelectedRequest.stops &&
+                  liveSelectedRequest.stops.length > 0 && (
+                    <div>
+                      <span className="text-[10px] uppercase text-[#5D87FF] font-bold block">
+                        PARADAS INTERMEDIAS ({liveSelectedRequest.stops.length})
+                      </span>
+                      {liveSelectedRequest.stops.map((s, i) => (
+                        <span key={i} className="block text-[#2A3547]">
+                          {i + 1}. {s.address}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+
+                <div>
+                  <span className="text-[10px] uppercase text-[#7C8FAC] font-bold block">
+                    DESTINO ({liveSelectedRequest.roundTrip ? "IDA Y VUELTA" : "SOLO IDA"})
+                  </span>
+                  <span className="font-bold text-[#2A3547]">
+                    {liveSelectedRequest.destination?.address}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3 pt-1">
+                  <div>
+                    <span className="text-[10px] uppercase text-[#7C8FAC] font-bold block">
+                      PASAJEROS ({liveSelectedRequest.passengersCount})
+                    </span>
+                    <span className="font-bold text-[#2A3547]">
+                      {(liveSelectedRequest.passengerNames || []).join(", ") ||
+                        liveSelectedRequest.travellerName ||
+                        liveSelectedRequest.requestedByName ||
+                        "Coordinador Corporativo"}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-[10px] uppercase text-[#7C8FAC] font-bold block">
+                      CARGA / EQUIPAJE
+                    </span>
+                    <span className="font-bold text-[#2A3547]">
+                      {liveSelectedRequest.hasCargo
+                        ? liveSelectedRequest.cargoDescription || "Sí incluye carga"
+                        : "Sin carga especial"}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="p-3 rounded-[8px] bg-[#E6FFFA] border border-[#13DEB9]/40">
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-[#0D9488] text-xs">
+                    Tarifa Oficial Aplicada: $
                     {Number(
                       liveSelectedRequest.finalAmount ??
                         liveSelectedRequest.tariffApplied?.calculatedAmount ??
@@ -2022,13 +2628,18 @@ export default function CorporatePortalPage() {
                     USD
                   </span>
                 </div>
-              )}
+                <span className="text-[11px] text-[#0F766E] block mt-0.5">
+                  Distancia facturable: {liveSelectedRequest.estimatedDistanceKm} km · Tarifa/km: $
+                  {Number(liveSelectedRequest.tariffApplied?.ratePerKm || 0.67).toFixed(2)} · Mínimo: $
+                  {Number(liveSelectedRequest.tariffApplied?.minFare || 13.56).toFixed(2)}
+                </span>
+              </div>
 
               {/* Bitácora de Eventos (CF-61) e Incidencias (CF-62 / CF-63) */}
               <div className="pt-3 border-t border-[#E5EAEF] space-y-3">
                 <div className="flex items-center justify-between">
                   <span className="text-xs font-bold text-[#2A3547]">
-                    Incidencias y Bitácora ({tripIncidents.length} incidencia(s))
+                    Incidencias del Traslado ({tripIncidents.length}) y Bitácora (CF-61 / CF-63)
                   </span>
                   <button
                     type="button"
@@ -2133,9 +2744,9 @@ export default function CorporatePortalPage() {
                 )}
 
                 {tripEvents.length > 0 && (
-                  <div className="p-2.5 rounded bg-[#F8FAFC] border border-[#E5EAEF] space-y-1 max-h-28 overflow-y-auto">
+                  <div className="p-3 rounded-[7px] bg-[#F8FAFC] border border-[#E5EAEF] space-y-1 max-h-36 overflow-y-auto">
                     <span className="text-[10px] font-bold uppercase text-[#7C8FAC] block">
-                      Bitácora de Auditoría del Servidor (CF-61)
+                      BITÁCORA DE AUDITORÍA DEL SERVIDOR (CF-61 · {tripEvents.length})
                     </span>
                     {tripEvents.map((ev) => (
                       <div
@@ -2143,9 +2754,9 @@ export default function CorporatePortalPage() {
                         className="text-[11px] text-[#5A6A85] flex justify-between"
                       >
                         <span>
-                          <strong>{ev.eventType}</strong>:{" "}
+                          • <strong>{ev.eventType}</strong>:{" "}
                           {ev.fromStatus ? `${ev.fromStatus} → ` : ""}
-                          {ev.toStatus || ""}
+                          {ev.toStatus || ""} ({ev.actorType || "system"})
                         </span>
                         <span className="text-[10px] text-[#7C8FAC]">
                           {ev.at ? new Date(ev.at).toLocaleTimeString() : ""}
@@ -2159,10 +2770,12 @@ export default function CorporatePortalPage() {
 
             <div className="flex justify-end space-x-2 pt-3 border-t border-[#E5EAEF]">
               {(liveSelectedRequest.status === "requested" ||
-                liveSelectedRequest.status === "seeking_driver") && (
+                (liveSelectedRequest.status === "seeking_driver" &&
+                  !(liveSelectedRequest as any).startedAt &&
+                  !(liveSelectedRequest as any).interruptionReason)) && (
                 <button
                   onClick={() => handleCancelRequest(liveSelectedRequest.id)}
-                  className="px-3.5 py-2 bg-[#FDEDE8] text-[#FA896B] rounded-[6px] text-xs font-bold flex items-center space-x-1"
+                  className="px-3.5 py-2 bg-[#FDEDE8] text-[#FA896B] rounded-[6px] text-xs font-bold flex items-center space-x-1 cursor-pointer"
                 >
                   <XCircle className="w-4 h-4" />
                   <span>Cancelar Solicitud</span>
@@ -2170,7 +2783,7 @@ export default function CorporatePortalPage() {
               )}
               <button
                 onClick={() => setSelectedRequest(null)}
-                className="px-4 py-2 bg-[#5D87FF] text-white rounded-[6px] text-xs font-bold"
+                className="px-4 py-2 bg-[#5D87FF] text-white rounded-[6px] text-xs font-bold cursor-pointer"
               >
                 Cerrar
               </button>
