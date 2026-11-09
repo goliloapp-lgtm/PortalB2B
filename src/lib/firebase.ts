@@ -39,6 +39,8 @@ export interface FareQuote {
   rateSource: string;
   chargedDistance: number;
   billableDistance: number;
+  minimumDistance?: number;
+  minimumApplied?: boolean;
   distanceUnit: string;
   appliedFareRate: number;
   countryFloorRate: number;
