@@ -4,14 +4,12 @@ import React, { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import Image from "next/image";
 import {
-  addDoc,
   collection,
   doc,
   getDocs,
   onSnapshot,
   query,
   serverTimestamp,
-  updateDoc,
   where,
 } from "firebase/firestore";
 import { ref as rtdbRef, onValue as onRtdbValue } from "firebase/database";
@@ -441,11 +439,18 @@ export default function CorporatePortalPage() {
     return scheduledTrips.map((st) => {
       const liveTrip = companyTrips.find(
         (t) =>
+          t.scheduledTripId === st.scheduledTripId ||
+          ((st as any).dispatchedTripId && t.tripId === (st as any).dispatchedTripId) ||
           t.tripId === st.scheduledTripId ||
           t.tripId === (st as any).id
       );
       const effectiveRawStatus = liveTrip?.status || st.status;
       const mappedStatus = mapRawTripStatus(effectiveRawStatus);
+
+      const effectiveTripId =
+        liveTrip?.tripId ||
+        (st as any).dispatchedTripId ||
+        st.scheduledTripId;
 
       const vehId = st.acceptedVehicleId;
       const veh = vehId ? vehiclesMap[vehId] : undefined;
@@ -469,9 +474,23 @@ export default function CorporatePortalPage() {
         ? undefined
         : veh?.plate || (st as any).vehiclePlate || undefined;
 
+      const rawCat = String(st.categoryId || "suv").toLowerCase();
+      let vehicleCategory: "suv" | "pickup" | "microbus" = "suv";
+      if (
+        rawCat.includes("microbus") ||
+        rawCat.includes("minibus") ||
+        rawCat.includes("furgon") ||
+        rawCat.includes("coaster") ||
+        rawCat.includes("van-minivan")
+      ) {
+        vehicleCategory = "microbus";
+      } else if (rawCat.includes("pickup")) {
+        vehicleCategory = "pickup";
+      }
+
       return {
         id: st.scheduledTripId,
-        tripId: st.scheduledTripId,
+        tripId: effectiveTripId,
         scheduledTripId: st.scheduledTripId,
         folio:
           (st as any).folio ||
@@ -490,16 +509,10 @@ export default function CorporatePortalPage() {
           trav?.name ||
           (st.travellerId ? "Viajero Corporativo" : ""),
         passengersCount:
-          (st as any).passengerCount || (st.categoryId === "microbus" ? 8 : 1),
+          (st as any).passengerCount || (vehicleCategory === "microbus" ? 8 : 1),
         passengerNames: trav?.name ? [trav.name] : [],
         passengerPhone: trav?.phone || "",
-        vehicleCategory: (
-          st.categoryId === "pickup"
-            ? "pickup"
-            : st.categoryId === "microbus"
-            ? "microbus"
-            : "suv"
-        ) as any,
+        vehicleCategory: vehicleCategory as any,
         hasCargo: Boolean((st as any).hasCargo),
         origin: {
           address: st.originAddress,
@@ -1199,11 +1212,13 @@ export default function CorporatePortalPage() {
     try {
       const target = requests.find((r) => r.id === reqId);
       const schedId = (target as any)?.scheduledTripId || target?.tripId;
-      const targetRideId = target?.tripId || schedId || reqId;
-      if (schedId && !target?.isImmediate) {
+      const isDispatched = Boolean(target?.tripId && target.tripId !== schedId);
+
+      if (isDispatched || target?.isImmediate) {
+        const liveTripId = target?.tripId || schedId || reqId;
+        await cancelCompanyReservationCallable({ tripId: liveTripId });
+      } else if (schedId) {
         await cancelScheduledTripCallable({ scheduledTripId: schedId });
-      } else if (target?.tripId) {
-        await cancelCompanyReservationCallable({ tripId: target.tripId });
       }
       toast.success("Tu traslado fue cancelado y el saldo ha sido liberado.");
       setSelectedRequest(null);
@@ -2663,7 +2678,17 @@ export default function CorporatePortalPage() {
                   !(liveSelectedRequest as any).interruptionReason)) && (
                 <button
                   onClick={() => handleCancelRequest(liveSelectedRequest.id)}
-                  className="px-3.5 py-2 bg-[#FDEDE8] text-[#FA896B] rounded-[6px] text-xs font-bold flex items-center space-x-1 cursor-pointer"
+                  disabled={companyRole !== "operator"}
+                  title={
+                    companyRole !== "operator"
+                      ? "La cancelación corporativa está restringida a usuarios con rol Operador (política backend Lilo SV)"
+                      : undefined
+                  }
+                  className={`px-3.5 py-2 rounded-[6px] text-xs font-bold flex items-center space-x-1 ${
+                    companyRole !== "operator"
+                      ? "bg-gray-100 text-gray-400 cursor-not-allowed"
+                      : "bg-[#FDEDE8] text-[#FA896B] cursor-pointer"
+                  }`}
                 >
                   <XCircle className="w-4 h-4" />
                   <span>Cancelar Solicitud</span>
