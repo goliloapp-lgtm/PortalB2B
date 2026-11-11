@@ -760,31 +760,6 @@ export default function NuevaSolicitudPortalB2BPage() {
 
       // CF-48 / CF-75: La reserva ha sido creada atómicamente por el backend (createScheduledTrip o createTrip)
       // D-01 / D-23: NINGUNA escritura directa de cliente a b2bRequests (reglas allow write: if false)
-      const targetRideId = createdScheduledTripId || createdTripId;
-      if (typeof window !== "undefined" && targetRideId) {
-        await fetch("/api/b2b/trip-status", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            tripId: targetRideId,
-            status: "requested",
-            companyId: company?.id,
-            passengerName: resolvedTraveller.fullName || resolvedTraveller.name,
-            passengerPhone: resolvedTraveller.phone,
-            origin: {
-              address: originPoint.address,
-              latitude: originPoint.lat,
-              longitude: originPoint.lng,
-            },
-            destination: {
-              address: destPoint.address,
-              latitude: destPoint.lat,
-              longitude: destPoint.lng,
-            },
-            farePrice: totalWithTax,
-          }),
-        }).catch(() => {});
-      }
 
       toast.success(
         isImmediate
