@@ -2678,14 +2678,14 @@ export default function CorporatePortalPage() {
                   !(liveSelectedRequest as any).interruptionReason)) && (
                 <button
                   onClick={() => handleCancelRequest(liveSelectedRequest.id)}
-                  disabled={companyRole !== "operator"}
+                  disabled={companyRole !== "operator" && companyRole !== "company_admin"}
                   title={
-                    companyRole !== "operator"
-                      ? "La cancelación corporativa está restringida a usuarios con rol Operador (política backend Lilo SV)"
+                    companyRole !== "operator" && companyRole !== "company_admin"
+                      ? "La cancelación corporativa está restringida a usuarios con rol Operador o Administrador de Empresa"
                       : undefined
                   }
                   className={`px-3.5 py-2 rounded-[6px] text-xs font-bold flex items-center space-x-1 ${
-                    companyRole !== "operator"
+                    companyRole !== "operator" && companyRole !== "company_admin"
                       ? "bg-gray-100 text-gray-400 cursor-not-allowed"
                       : "bg-[#FDEDE8] text-[#FA896B] cursor-pointer"
                   }`}
