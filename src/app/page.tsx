@@ -54,11 +54,6 @@ import { B2BRequestStatus, B2BServiceRequest, CostCenter } from "@/types/b2b";
 import GoogleTripTrackingMap from "@/components/maps/GoogleTripTrackingMap";
 import { formatFriendlyError } from "@/lib/friendlyError";
 import {
-  subscribeToCompanyTripFeed,
-  subscribeToRideRequest,
-  TripStatusFeedMap,
-} from "@/services/tripStatusFeedService";
-import {
   mapRawTripStatus,
   getLifecycleStepIndex,
   LIFECYCLE_STEPS,
@@ -179,7 +174,6 @@ export default function CorporatePortalPage() {
 
   const [rawRequests, setRawRequests] = useState<B2BServiceRequest[]>([]);
   const [companyTrips, setCompanyTrips] = useState<any[]>([]);
-  const [tripStatusFeed, setTripStatusFeed] = useState<TripStatusFeedMap>({});
   const [vehiclesMap, setVehiclesMap] = useState<Record<string, any>>({});
 
   const [searchTerm, setSearchTerm] = useState("");
@@ -319,12 +313,23 @@ export default function CorporatePortalPage() {
 
   useEffect(() => {
     reloadAdminData();
-    const timer = setInterval(fetchCompanyTripsAndScheduled, 15000);
+    const refresh = () => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      void fetchCompanyTripsAndScheduled();
+    };
+    const timer = setInterval(refresh, 10000);
     const onFocus = () => void fetchCompanyTripsAndScheduled();
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") {
+        void fetchCompanyTripsAndScheduled();
+      }
+    };
     window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibility);
     return () => {
       clearInterval(timer);
       window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibility);
     };
   }, [user, company?.id, isCompanyAdmin]);
 
@@ -432,31 +437,17 @@ export default function CorporatePortalPage() {
     return () => unsubscribe();
   }, [user, company?.id, loading]);
 
-  // Sincronización global en tiempo real mediante tripStatusFeed (WebSocket RTDB)
-  useEffect(() => {
-    if (!company?.id) return;
-    const unsubFeed = subscribeToCompanyTripFeed(company.id, (feedMap) => {
-      setTripStatusFeed(feedMap);
-    });
-    return () => unsubFeed();
-  }, [company?.id]);
-
   const mappedScheduledRequests = useMemo<B2BServiceRequest[]>(() => {
     return scheduledTrips.map((st) => {
-      const feed =
-        tripStatusFeed[st.scheduledTripId] ||
-        tripStatusFeed[(st as any).tripId] ||
-        tripStatusFeed[(st as any).id];
       const liveTrip = companyTrips.find(
         (t) =>
           t.tripId === st.scheduledTripId ||
           t.tripId === (st as any).id
       );
-      const effectiveRawStatus =
-        feed?.rawStatus || feed?.status || liveTrip?.status || st.status;
+      const effectiveRawStatus = liveTrip?.status || st.status;
       const mappedStatus = mapRawTripStatus(effectiveRawStatus);
 
-      const vehId = feed?.vehicleId || st.acceptedVehicleId;
+      const vehId = st.acceptedVehicleId;
       const veh = vehId ? vehiclesMap[vehId] : undefined;
       const cc = costCenters.find(
         (c) => c.id === (st as any).costCentreId || c.id === (st as any).costCenterId
@@ -467,16 +458,16 @@ export default function CorporatePortalPage() {
         mappedStatus === "seeking_driver" || mappedStatus === "requested";
       const driverId = isSeeking
         ? undefined
-        : feed?.driverId || (st as any).driverId || veh?.driverId || undefined;
+        : liveTrip?.driverId || (st as any).driverId || veh?.driverId || undefined;
       const driverName = isSeeking
         ? undefined
-        : feed?.driverName || veh?.driverName || (st as any).driverName || undefined;
+        : veh?.driverName || (st as any).driverName || undefined;
       const driverPhone = isSeeking
         ? undefined
-        : feed?.driverPhone || veh?.driverPhone || (st as any).driverPhone || undefined;
+        : veh?.driverPhone || (st as any).driverPhone || undefined;
       const vehiclePlate = isSeeking
         ? undefined
-        : feed?.vehiclePlate || veh?.plate || (st as any).vehiclePlate || undefined;
+        : veh?.plate || (st as any).vehiclePlate || undefined;
 
       return {
         id: st.scheduledTripId,
@@ -547,13 +538,12 @@ export default function CorporatePortalPage() {
         assignedVehicleId: isSeeking ? undefined : vehId,
         assignedVehiclePlate: vehiclePlate,
         status: mappedStatus,
-        notes: feed?.rawStatus === "seeking_driver" ? (feed as any).notes : undefined,
+        notes: (liveTrip as any)?.notes,
       } as B2BServiceRequest;
     });
   }, [
     scheduledTrips,
     companyTrips,
-    tripStatusFeed,
     vehiclesMap,
     costCenters,
     travellersList,
@@ -566,35 +556,21 @@ export default function CorporatePortalPage() {
 
   const requests = useMemo<B2BServiceRequest[]>(() => {
     const list: B2BServiceRequest[] = rawRequests.map((r) => {
-      const targetId = r.tripId || (r as any).scheduledTripId || r.id;
-      const feed =
-        tripStatusFeed[r.id] ||
-        tripStatusFeed[r.tripId] ||
-        tripStatusFeed[(r as any).scheduledTripId] ||
-        tripStatusFeed[targetId];
-      const resolvedStatus = feed?.status || mapRawTripStatus(r.status);
+      const resolvedStatus = mapRawTripStatus(r.status);
       const isSeeking =
         resolvedStatus === "seeking_driver" || resolvedStatus === "requested";
-      const vehId = feed?.vehicleId || r.assignedVehicleId;
+      const vehId = r.assignedVehicleId;
       const veh = vehId ? vehiclesMap[vehId] : undefined;
 
       return {
         ...r,
         status: resolvedStatus,
-        assignedDriverId: isSeeking
-          ? undefined
-          : feed?.driverId ?? r.assignedDriverId ?? veh?.driverId,
-        assignedDriverName: isSeeking
-          ? undefined
-          : feed?.driverName ?? r.assignedDriverName ?? veh?.driverName,
-        assignedDriverPhone: isSeeking
-          ? undefined
-          : feed?.driverPhone ?? r.assignedDriverPhone ?? veh?.driverPhone,
+        assignedDriverId: isSeeking ? undefined : r.assignedDriverId ?? veh?.driverId,
+        assignedDriverName: isSeeking ? undefined : r.assignedDriverName ?? veh?.driverName,
+        assignedDriverPhone: isSeeking ? undefined : r.assignedDriverPhone ?? veh?.driverPhone,
         assignedVehicleId: isSeeking ? undefined : vehId,
-        assignedVehiclePlate: isSeeking
-          ? undefined
-          : feed?.vehiclePlate ?? r.assignedVehiclePlate ?? veh?.plate,
-        notes: feed?.rawStatus === "seeking_driver" ? (feed as any).notes || r.notes : r.notes,
+        assignedVehiclePlate: isSeeking ? undefined : r.assignedVehiclePlate ?? veh?.plate,
+        notes: r.notes,
       };
     });
 
@@ -606,13 +582,7 @@ export default function CorporatePortalPage() {
           r.tripId === sReq.id
       );
 
-      const targetId = sReq.id || sReq.tripId || (sReq as any).scheduledTripId || "";
-      const feed =
-        tripStatusFeed[sReq.id] ||
-        tripStatusFeed[sReq.tripId] ||
-        tripStatusFeed[(sReq as any).scheduledTripId] ||
-        tripStatusFeed[targetId];
-      const resolvedStatus = feed?.status || sReq.status;
+      const resolvedStatus = sReq.status;
       const isSeeking =
         resolvedStatus === "seeking_driver" || resolvedStatus === "requested";
 
@@ -623,19 +593,19 @@ export default function CorporatePortalPage() {
           status: resolvedStatus,
           assignedDriverId: isSeeking
             ? undefined
-            : feed?.driverId ?? sReq.assignedDriverId ?? list[existingIdx].assignedDriverId,
+            : sReq.assignedDriverId ?? list[existingIdx].assignedDriverId,
           assignedDriverName: isSeeking
             ? undefined
-            : feed?.driverName ?? sReq.assignedDriverName ?? list[existingIdx].assignedDriverName,
+            : sReq.assignedDriverName ?? list[existingIdx].assignedDriverName,
           assignedDriverPhone: isSeeking
             ? undefined
-            : feed?.driverPhone ?? sReq.assignedDriverPhone ?? list[existingIdx].assignedDriverPhone,
+            : sReq.assignedDriverPhone ?? list[existingIdx].assignedDriverPhone,
           assignedVehicleId: isSeeking
             ? undefined
-            : feed?.vehicleId ?? sReq.assignedVehicleId ?? list[existingIdx].assignedVehicleId,
+            : sReq.assignedVehicleId ?? list[existingIdx].assignedVehicleId,
           assignedVehiclePlate: isSeeking
             ? undefined
-            : feed?.vehiclePlate ?? sReq.assignedVehiclePlate ?? list[existingIdx].assignedVehiclePlate,
+            : sReq.assignedVehiclePlate ?? list[existingIdx].assignedVehiclePlate,
         };
       } else {
         list.push({
@@ -646,8 +616,6 @@ export default function CorporatePortalPage() {
     }
 
     const getCreatedTimestamp = (req: B2BServiceRequest): number => {
-      const feedUpd = tripStatusFeed[req.id]?.updatedAt;
-      if (typeof feedUpd === "number" && feedUpd > 0) return feedUpd;
       const c = req.createdAt as any;
       if (typeof c === "number" && c > 0) return c;
       if (typeof c?.toMillis === "function") return c.toMillis();
@@ -662,12 +630,7 @@ export default function CorporatePortalPage() {
     list.sort((a, b) => getCreatedTimestamp(b) - getCreatedTimestamp(a));
 
     return list;
-  }, [
-    rawRequests,
-    mappedScheduledRequests,
-    tripStatusFeed,
-    vehiclesMap,
-  ]);
+  }, [rawRequests, mappedScheduledRequests, vehiclesMap]);
 
   // Mantener sincronizada la solicitud abierta en el modal de monitoreo en vivo
   const liveSelectedRequest = useMemo(() => {
@@ -700,6 +663,7 @@ export default function CorporatePortalPage() {
       return;
     }
 
+    let lastSig: string | null = null;
     const driverLocationRef = rtdbRef(rtdb, `conductores_activos/${driverId}`);
     const unsubscribeRtdb = onRtdbValue(
       driverLocationRef,
@@ -720,6 +684,11 @@ export default function CorporatePortalPage() {
             updatedAt: val.updatedAt || val.timestamp || Date.now(),
             status: val.status,
           });
+          const nextSig = `${val.status || ""}:${val.currentRideId || ""}:${val.lastStatusUpdate || ""}`;
+          if (lastSig !== null && lastSig !== nextSig) {
+            void fetchCompanyTripsAndScheduled();
+          }
+          lastSig = nextSig;
         } else {
           setDriverTelemetry(null);
         }
@@ -732,49 +701,61 @@ export default function CorporatePortalPage() {
     return () => unsubscribeRtdb();
   }, [liveSelectedRequest?.assignedDriverId]);
 
-  // Escucha de rideRequests para la solicitud seleccionada en el modal
+  const activeAssignedDriverIdsKey = useMemo(() => {
+    const ids = new Set<string>();
+    for (const r of requests) {
+      if (
+        r.assignedDriverId &&
+        r.status !== "completed" &&
+        r.status !== "cancelled"
+      ) {
+        ids.add(r.assignedDriverId);
+      }
+    }
+    return Array.from(ids).sort().join(",");
+  }, [requests]);
+
+  // Escucha cambios en conductores_activos/{driverId} (regla RTDB 9731da6: auth != null)
+  // para refrescar la tabla corporativa al instante cuando el conductor cambia de estado.
   useEffect(() => {
-    const targetRideId =
-      liveSelectedRequest?.tripId ||
-      (liveSelectedRequest as any)?.scheduledTripId ||
-      liveSelectedRequest?.id;
+    if (!user || !company?.id || !activeAssignedDriverIdsKey) return;
+    const driverIds = activeAssignedDriverIdsKey.split(",").filter(Boolean);
+    const lastSigs = new Map<string, string>();
+    let refreshTimer: ReturnType<typeof setTimeout> | null = null;
 
-    if (!targetRideId) return;
+    const scheduleRefresh = () => {
+      if (refreshTimer) clearTimeout(refreshTimer);
+      refreshTimer = setTimeout(() => {
+        void fetchCompanyTripsAndScheduled();
+      }, 250);
+    };
 
-    const unsubRide = subscribeToRideRequest(targetRideId, (rideData) => {
-      if (!rideData) return;
+    const unsubscribers = driverIds.map((driverId) =>
+      onRtdbValue(
+        rtdbRef(rtdb, `conductores_activos/${driverId}`),
+        (snapshot) => {
+          const val = snapshot.val();
+          const nextSig =
+            val && typeof val === "object"
+              ? `${val.status || ""}:${val.currentRideId || ""}:${val.lastStatusUpdate || ""}`
+              : "__empty__";
+          const prevSig = lastSigs.get(driverId);
+          lastSigs.set(driverId, nextSig);
+          if (prevSig !== undefined && prevSig !== nextSig) {
+            scheduleRefresh();
+          }
+        },
+        (err) => {
+          console.warn(`[PortalB2B RTDB] Listener conductor ${driverId}:`, err);
+        }
+      )
+    );
 
-      if (rideData.status) {
-        const mapped = mapRawTripStatus(rideData.status);
-        setTripStatusFeed((prev) => ({
-          ...prev,
-          [targetRideId]: {
-            ...(prev[targetRideId] || {}),
-            tripId: targetRideId,
-            status: mapped,
-            rawStatus: rideData.status,
-            updatedAt: rideData.updatedAt || Date.now(),
-            driverId: rideData.driverId ?? prev[targetRideId]?.driverId,
-            vehicleId: rideData.vehicleId ?? prev[targetRideId]?.vehicleId,
-          } as any,
-        }));
-      }
-
-      if (rideData.driverTelemetry?.lat || rideData.latitude) {
-        setDriverTelemetry((prev) => ({
-          ...(prev || {}),
-          lat: rideData.driverTelemetry?.lat || rideData.latitude,
-          lng: rideData.driverTelemetry?.lng || rideData.longitude,
-          heading: rideData.driverTelemetry?.heading || rideData.bearing,
-          speed: rideData.driverTelemetry?.speed || rideData.speed,
-          status: rideData.driverTelemetry?.status || rideData.status,
-          updatedAt: Date.now(),
-        }));
-      }
-    });
-
-    return () => unsubRide();
-  }, [liveSelectedRequest?.id, liveSelectedRequest?.tripId, (liveSelectedRequest as any)?.scheduledTripId]);
+    return () => {
+      if (refreshTimer) clearTimeout(refreshTimer);
+      unsubscribers.forEach((unsub) => unsub());
+    };
+  }, [user?.uid, company?.id, activeAssignedDriverIdsKey]);
 
   const filteredRequests = useMemo(() => {
     const now = Date.now();
@@ -865,12 +846,7 @@ export default function CorporatePortalPage() {
   }) => {
     const base = STATUS_LABELS[req.status] || STATUS_LABELS.requested;
     if (req.status !== "seeking_driver") return base;
-    const feedEntry =
-      tripStatusFeed[req.id] ||
-      (req.tripId ? tripStatusFeed[req.tripId] : undefined) ||
-      (req.scheduledTripId ? tripStatusFeed[req.scheduledTripId] : undefined);
     const isReassigning =
-      feedEntry?.rawStatus === "seeking_driver" ||
       Boolean(req.interruptionReason) ||
       Boolean(req.notes);
     return isReassigning

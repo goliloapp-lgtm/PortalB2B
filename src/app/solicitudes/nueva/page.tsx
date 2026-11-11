@@ -69,7 +69,7 @@ import {
   ChevronDown,
 } from "lucide-react";
 
-export const getMinReservationDateTime = (hours = B2B_RESERVATION_CONFIG.minAdvanceHours) => {
+const getMinReservationDateTime = (hours = B2B_RESERVATION_CONFIG.minAdvanceHours) => {
   // Se agregan 15 minutos de margen para evitar que el reloj alcance la hora mínima mientras se llena el formulario
   const target = new Date(Date.now() + hours * 60 * 60 * 1000 + 15 * 60 * 1000);
   const pad = (n: number) => String(n).padStart(2, "0");
