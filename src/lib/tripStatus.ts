@@ -113,6 +113,50 @@ export function isTerminalStatus(status: string): boolean {
   return TERMINAL_STATUSES.includes(norm);
 }
 
+/**
+ * Los estados NORMALIZADOS desde los que la empresa todavía puede cancelar.
+ *
+ * La fuente es el backend, no este archivo: `CANCELLABLE_SCHEDULED_TRIP_STATUSES`
+ * (`functions/src/b2b/scheduledTripStatus.ts:103`) acepta CINCO estados crudos y
+ * `cancelScheduledTrip` responde `failed-precondition` con la lista para cualquier
+ * otro. Acá se guardan ya normalizados, porque los objetos de este portal
+ * sobrescriben el estado crudo con `mapRawTripStatus` al construirse:
+ *
+ * ```
+ *   pending_approval                       -> requested        (cancelable)
+ *   available | offered | driver_rejected  -> seeking_driver   (cancelable)
+ *   driver_assigned                        -> assigned         (cancelable)
+ *   dispatched                             -> enRoute          (NO: ya es un viaje)
+ * ```
+ *
+ * `requested` no es un estado de reserva del backend. Se conserva porque es el
+ * cubo que hoy recibe `pending_approval` —que SÍ se cancela, y cancelarlo libera
+ * su techo— y porque es el destino por defecto de un estado ausente o desconocido
+ * (`mapRawTripStatus`); un estado desconocido lo rechaza el backend nombrando la
+ * lista.
+ *
+ * Todo lo que no está acá es post-despacho o terminal —`dispatched`, `completed`,
+ * `expired`, `cancelled`— y la empresa no lo cancela: un viaje en curso se reporta
+ * y se reasigna (CF-87).
+ */
+export const COMPANY_CANCELLABLE_STATUSES: readonly B2BRequestStatus[] = [
+  "requested",
+  "seeking_driver",
+  "assigned",
+];
+
+/**
+ * ¿La empresa todavía puede cancelar esta reserva?
+ *
+ * Acepta el estado crudo del backend o el ya normalizado: `mapRawTripStatus` es
+ * idempotente sobre todo valor de {@link B2BRequestStatus}.
+ */
+export function isCompanyCancellableStatus(
+  status: string | null | undefined
+): boolean {
+  return COMPANY_CANCELLABLE_STATUSES.includes(mapRawTripStatus(status));
+}
+
 export interface TripStatusFeedEntry {
   tripId: string;
   status: B2BRequestStatus;

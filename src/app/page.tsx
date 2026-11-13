@@ -54,6 +54,7 @@ import { formatFriendlyError } from "@/lib/friendlyError";
 import {
   mapRawTripStatus,
   getLifecycleStepIndex,
+  isCompanyCancellableStatus,
   LIFECYCLE_STEPS,
 } from "@/lib/tripStatus";
 import {
@@ -2672,10 +2673,11 @@ export default function CorporatePortalPage() {
             </div>
 
             <div className="flex justify-end space-x-2 pt-3 border-t border-[#E5EAEF]">
-              {(liveSelectedRequest.status === "requested" ||
-                (liveSelectedRequest.status === "seeking_driver" &&
-                  !(liveSelectedRequest as any).startedAt &&
-                  !(liveSelectedRequest as any).interruptionReason)) && (
+              {/* Cancelar es una sola regla: la reserva todavía no se despachó.
+                  Antes se enumeraban `requested` y `seeking_driver` a mano, así
+                  que una reserva ya asignada (`driver_assigned` -> `assigned`)
+                  nunca mostraba el botón aunque el backend sí la cancela. */}
+              {isCompanyCancellableStatus(liveSelectedRequest.status) && (
                 <button
                   onClick={() => handleCancelRequest(liveSelectedRequest.id)}
                   disabled={companyRole !== "operator" && companyRole !== "company_admin"}
