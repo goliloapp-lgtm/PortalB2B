@@ -75,6 +75,31 @@ const getMinReservationDateTime = (hours = B2B_RESERVATION_CONFIG.minAdvanceHour
   return `${target.getFullYear()}-${pad(target.getMonth() + 1)}-${pad(target.getDate())}T${pad(target.getHours())}:${pad(target.getMinutes())}`;
 };
 
+// F6: el techo real de un centro de costo. La fórmula es `spent + reserved` contra
+// `budgetLimit` (CONTRATO_FRONTEND.md, CF-23 y los centros de costo de `createScheduledTrip`).
+// `monthlyBudget` es un campo legado y NO es el techo: si falta `budgetLimit` el centro está
+// «sin límite definido», y no se inventa un número con el que compararlo.
+const formatCostCentreCeiling = (cc: CostCenter): string => {
+  const used = Number(cc.spent || 0) + Number(cc.reserved || 0);
+  const limit =
+    typeof cc.budgetLimit === "number" ? cc.budgetLimit : null;
+  const usedText = ` · Consumido + reservado $${used.toFixed(2)}`;
+  return limit === null
+    ? ` · sin límite definido${usedText}`
+    : ` · Techo $${limit.toFixed(2)}${usedText}`;
+};
+
+// F6: el selector no elige solo. Se conserva la elección previa mientras siga siendo
+// válida y solo se autoselecciona cuando la empresa tiene exactamente un centro: con
+// varios, la elección es del operador y el envío la exige (`handleSubmit`).
+const resolveCostCentreSelection = (
+  list: CostCenter[],
+  previous: string
+): string => {
+  if (previous && list.some((c) => c.id === previous)) return previous;
+  return list.length === 1 ? list[0].id : "";
+};
+
 export default function NuevaSolicitudPortalB2BPage() {
   const router = useRouter();
   const { user, company, companyRole, mustChangePassword, loading } = useAuth();
@@ -272,11 +297,7 @@ export default function NuevaSolicitudPortalB2BPage() {
                 status: c.active ? "active" : "inactive",
               }));
             setCostCenters(mapped);
-            if (mapped.length > 0) {
-              setCostCenterId((prev) =>
-                prev && mapped.some((c) => c.id === prev) ? prev : mapped[0].id
-              );
-            }
+            setCostCenterId((prev) => resolveCostCentreSelection(mapped, prev));
           }
         })
         .catch(() => {});
@@ -319,13 +340,7 @@ export default function NuevaSolicitudPortalB2BPage() {
           .map((d) => ({ id: d.id, ...d.data() } as CostCenter))
           .filter((c: any) => c.active !== false && c.status !== "inactive");
         setCostCenters(list);
-        if (list.length > 0) {
-          setCostCenterId((prev) =>
-            prev && list.some((c) => c.id === prev) ? prev : list[0].id
-          );
-        } else {
-          setCostCenterId("");
-        }
+        setCostCenterId((prev) => resolveCostCentreSelection(list, prev));
       },
       (err) => console.error("Error cargando centros de costo:", err)
     );
@@ -615,8 +630,11 @@ export default function NuevaSolicitudPortalB2BPage() {
           "Por favor selecciona el departamento o centro de costo al que corresponde este traslado."
         );
       }
+      // F6: con varios centros la elección es del operador. `costCenters[0]` solo es un
+      // atajo legítimo cuando la empresa tiene exactamente un centro.
       const selectedCC =
-        costCenters.find((c) => c.id === costCenterId) || costCenters[0];
+        costCenters.find((c) => c.id === costCenterId) ||
+        (costCenters.length === 1 ? costCenters[0] : undefined);
       let resolvedTraveller =
         travellers.find((t) => t.id === travellerId) || travellers[0];
 
@@ -1237,23 +1255,20 @@ export default function NuevaSolicitudPortalB2BPage() {
                         Sin centro de costo registrado en la empresa
                       </option>
                     ) : (
-                      costCenters.map((cc) => {
-                        const limit =
-                          cc.budgetLimit ?? cc.monthlyBudget ?? null;
-                        const spentVal = Number(cc.spent || 0);
-                        const limitText = isCompanyAdmin
-                          ? limit === null
-                            ? ` · SIN LÍMITE · Consumido $${spentVal.toFixed(2)}`
-                            : ` · Techo $${Number(limit).toFixed(2)} · Consumido $${spentVal.toFixed(2)}`
-                          : "";
-                        return (
+                      <>
+                        {costCenters.length > 1 && (
+                          <option value="">
+                            -- Seleccionar centro de costo --
+                          </option>
+                        )}
+                        {costCenters.map((cc) => (
                           <option key={cc.id} value={cc.id}>
                             {cc.code ? `${cc.code} — ` : ""}
                             {cc.name}
-                            {limitText}
+                            {isCompanyAdmin ? formatCostCentreCeiling(cc) : ""}
                           </option>
-                        );
-                      })
+                        ))}
+                      </>
                     )}
                   </select>
                 </div>

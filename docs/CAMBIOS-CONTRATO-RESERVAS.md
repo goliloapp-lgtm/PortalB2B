@@ -173,3 +173,123 @@ process.exit(fail === 0 ? 0 : 1);
 
 Y a ojo, en la consola de empresa: una reserva en `driver_assigned` (badge «Conductor
 Asignado») ahora muestra «Cancelar Solicitud»; una en `dispatched` o posterior, no.
+
+---
+
+## F6 — El techo se muestra completo en el selector
+
+**Qué se tocó.** `src/app/solicitudes/nueva/page.tsx` (el selector de centro de costo del
+alta, los dos efectos que cargan los centros y el reparto del envío) y `src/app/page.tsx`
+(el respaldo legado del panel de centros). La regla del techo queda declarada una sola vez,
+en `formatCostCentreCeiling`.
+
+### La fórmula
+
+```
+usado     = Number(cc.spent || 0) + Number(cc.reserved || 0)
+techo     = cc.budgetLimit   (number)  →  « · Techo $<techo> · Consumido + reservado $<usado>»
+             cc.budgetLimit ausente/null →  « · sin límite definido · Consumido + reservado $<usado>»
+```
+
+**El techo es `budgetLimit` y nada más.** `reserved` es dinero comprometido por reservas
+vivas que todavía no se realizaron (`reserved → spent` al cerrar), así que el consumo real
+de un centro es la suma y no `spent` a solas. Mostrar sólo `spent` dejaba al operador con
+la impresión de que tenía todo el techo libre cuando la mitad ya estaba reservada.
+
+**`monthlyBudget` no es el techo y dejó de ser el respaldo.** La línea anterior era
+`cc.budgetLimit ?? cc.monthlyBudget ?? null` (`nueva/page.tsx:1242` y `page.tsx:1594`
+antes de este cambio). `budgetLimit` ausente significa **SIN LÍMITE**
+(`CONTRATO_FRONTEND.md`, CF-23) y el backend no aplica `monthlyBudget` a nada: usarlo como
+respaldo mostraba un número que ninguna llamada iba a respetar, que es peor que no mostrar
+ninguno. Ahora, sin `budgetLimit`, el centro se lista **sin techo** y con el texto «sin
+límite definido» más el acumulado real, que sí es un dato.
+
+### Los cuatro casos
+
+| Centros en la empresa | Qué hace el selector | Qué manda el envío |
+|---|---|---|
+| **0** | Sólo el texto «Sin centro de costo registrado en la empresa»; no hay nada que elegir | `costCentreId: undefined`; no hay guarda que dispare |
+| **1** | **Se autoselecciona el único**: sin una elección real no hay nada que decidir y elegir de una lista de uno es ceremonia | El id de ese centro |
+| **varios** | **Arranca vacío**, con la opción `-- Seleccionar centro de costo --`. **El selector no elige solo** | Hasta que el operador elija, `handleSubmit` corta con «Por favor selecciona el departamento o centro de costo al que corresponde este traslado.» (`nueva/page.tsx:628-632`). Con elección, el id elegido |
+| **sin `budgetLimit`** (el centro existe, el techo no) | «· sin límite definido · Consumido + reservado $X» — sin techo que comparar, sin número inventado | Igual: la falta de techo no es falta de centro |
+
+La elección previa se conserva mientras el centro siga existiendo y activo; una elección
+que desapareció de la lista vuelve a vacío. Esa regla vive en una sola función
+(`resolveCostCentreSelection`) que usan los dos caminos de carga — el callable
+`listCostCentresCallable` y el `onSnapshot` de `costCenters` —, en lugar de estar escrita
+dos veces con la misma forma. La regla es la misma del dashboard de plataforma: se
+autoselecciona sólo cuando no hay nada que elegir.
+
+### Por qué la guarda de `handleSubmit` ahora se ejercita
+
+Las dos cargas terminaban en la misma expresión, una por camino:
+
+```tsx
+setCostCenterId((prev) =>
+  prev && mapped.some((c) => c.id === prev) ? prev : mapped[0].id
+);
+```
+
+Con eso, `costCenterId` nunca estaba vacío con centros cargados y la guarda
+`costCenters.length > 1 && !costCenterId` (`nueva/page.tsx:628`) no se podía alcanzar. Con
+la autoselección limitada al caso de un solo centro, la guarda es el camino normal de un
+operador con varios centros que pulsa «Solicitar» sin elegir, y el error se ve en pantalla
+en lugar de salir del backend como `failed-precondition`.
+
+También se acotó el atajo del envío: `costCenters[0]` era el respaldo de un id ausente y
+elegía por el operador. Ahora sólo se usa cuando la empresa tiene exactamente un centro.
+
+### Qué NO se tocó
+
+- El mapeo de estados de una reserva (`src/lib/tripStatus.ts`, `mapRawTripStatus`): F5 lo
+  dejó como está y corregirlo es F7.
+- El reparto de callables de cancelación (`handleCancelRequest`): ya reparte bien y es F7.
+- Quién ve el texto del techo: sigue siendo `isCompanyAdmin` el que lo ve en el selector,
+  igual que antes. Ampliarlo a todos los roles es una decisión de visibilidad que este
+  cambio no toma.
+- El panel de centros de `page.tsx` en todo lo demás: sólo perdió el respaldo
+  `monthlyBudget`. La edición del techo sigue por `updateCostCentreCallable` («Vacío =
+  SIN LÍMITE», botón `∞`) y la etiqueta «SIN LÍMITE» sigue igual.
+
+### Cómo se verifica
+
+```bash
+npx eslint src/app/page.tsx src/app/solicitudes/nueva/page.tsx   # 102 problemas, los mismos de antes
+npx tsc --noEmit                                                 # exit 0
+```
+
+`eslint` no suma ni un problema: el conteo por archivo es idéntico al de `HEAD`
+(`src/app/page.tsx` 60 errores y 16 warnings, `src/app/solicitudes/nueva/page.tsx`
+9 errores y 17 warnings; 102 en total), y todos son los `@typescript-eslint/no-explicit-any`
+y `no-unused-vars` que ya estaban. El rojo de `lint` en este repo es anterior a F6.
+
+La lógica de las dos funciones se ejercita sin navegador, extrayendo su fuente del archivo
+real, transpilándola en memoria y corriendo la matriz (scratch fuera del worktree):
+
+```js
+// techo: spent + reserved contra budgetLimit
+{ budgetLimit: 1200, spent: 300, reserved: 145.5 } → " · Techo $1200.00 · Consumido + reservado $445.50"
+{ budgetLimit: 500,  spent: 100, reserved: 0 }     → " · Techo $500.00 · Consumido + reservado $100.00"
+{ budgetLimit: 100,  spent: 42 }                   → " · Techo $100.00 · Consumido + reservado $42.00"   // reserved ausente = 0
+{ budgetLimit: null, spent: 80, reserved: 20 }     → " · sin límite definido · Consumido + reservado $100.00"
+{ budgetLimit: undefined, spent: 0, reserved: 0 }  → " · sin límite definido · Consumido + reservado $0.00"
+{ budgetLimit: null, monthlyBudget: 999, spent: 10, reserved: 5 }
+                                                   → " · sin límite definido · Consumido + reservado $15.00"  // legado ignorado
+
+// selección: 0 / 1 / varios
+[] , ""                  → ""        // 0 centros: nada que elegir
+[] , "a"                 → ""        // la elección previa no sobrevive a una lista vacía
+[unico] , ""             → "unico"   // 1 centro: se autoselecciona
+[unico] , "unico"        → "unico"   // y se conserva
+[a, b] , ""              → ""        // varios: arranca vacío, elige el operador
+[a, b] , "b"             → "b"       // varios: se respeta la elección del operador
+[a, b] , "z"             → ""        // varios: una elección inexistente no se inventa
+# matriz OK: 13 casos   (exit 0)
+```
+
+Y a ojo, en la consola de empresa con dos centros (`Operaciones` con techo $1,200 y
+`spent` $300 + `reserved` $145.50; `Administración` sin `budgetLimit`): el selector arranca
+en «-- Seleccionar centro de costo --», la primera opción dice
+«Operaciones · Techo $1200.00 · Consumido + reservado $445.50», la segunda dice
+«Administración · sin límite definido · Consumido + reservado $0.00», y pulsar «Solicitar»
+sin elegir muestra el mensaje de la guarda en vez de enviar la reserva.

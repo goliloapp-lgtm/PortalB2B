@@ -1591,7 +1591,9 @@ export default function CorporatePortalPage() {
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               {costCenters.map((cc) => {
-                const limitVal = cc.budgetLimit ?? cc.monthlyBudget ?? null;
+                // F6: el techo es `budgetLimit` y nada más. `monthlyBudget` es un campo
+                // legado; usarlo como respaldo mostraba un techo que el backend no aplica.
+                const limitVal = cc.budgetLimit ?? null;
                 const isUnlimited = limitVal === null || limitVal === undefined;
                 const used = Number(cc.spent || 0) + Number(cc.reserved || 0);
                 const draftVal =
