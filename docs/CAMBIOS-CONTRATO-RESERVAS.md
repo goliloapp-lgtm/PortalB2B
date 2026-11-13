@@ -293,3 +293,174 @@ en «-- Seleccionar centro de costo --», la primera opción dice
 «Operaciones · Techo $1200.00 · Consumido + reservado $445.50», la segunda dice
 «Administración · sin límite definido · Consumido + reservado $0.00», y pulsar «Solicitar»
 sin elegir muestra el mensaje de la guarda en vez de enviar la reserva.
+
+---
+
+## F7 — Los estados son los del backend
+
+**Qué se tocó.** `src/lib/tripStatus.ts` (el vocabulario normalizado, la escalera y el mapeo) y
+`src/app/page.tsx` (las etiquetas, el filtro, el KPI y la línea de tiempo que los consumen).
+
+La reserva (`scheduledTrips`) escribe **ocho** estados —`available`, `offered`, `driver_rejected`,
+`driver_assigned`, `dispatched`, `completed`, `cancelled`, `expired`— más `pending_approval`, que crea
+la vía de excepción de plataforma (CF-84, `functions/src/b2b/scheduledTripStatus.ts:22`). Eso es lo
+que muestra la consola.
+
+### El vocabulario viejo
+
+Doce valores normalizados, de los cuales seis no los escribe ninguna reserva:
+
+| Normalizado viejo | Quién lo escribía de verdad | En F7 |
+|---|---|---|
+| `requested` | Nadie: era el cubo por defecto, el de `pending_approval` y el de `b2bRequests` | `pending_approval` o `available`, según el crudo |
+| `seeking_driver` | Un cubo para `available` + `offered` + `driver_rejected` (y el `seeking_driver` de `trips`) | Los tres de reserva, cada uno con su nombre; el del viaje cae en `dispatched` |
+| `confirmed` | **Nadie.** No existe en el backend | **Eliminado** |
+| `assigned` | Cubo de `driver_assigned` | `driver_assigned` |
+| `enRoute` | Nadie: lo llenaba `accepted`/`dispatched` | `dispatched` |
+| `driverArrived` | Nadie: lo llenaba `driver_arrived` | `dispatched` |
+| `inService` | Nadie: lo llenaba `in_progress` | `dispatched` |
+| `arrived` | Nadie lo escribe una reserva: es un estado de `trips` | `dispatched` |
+| `completed` | Sí | `completed` |
+| `invoiced` | **Nadie.** El cierre es `completed` | **Eliminado** |
+| `cancelled` | Sí, pero se tragaba `expired` | `cancelled`, solo |
+| `rejected` | **Nadie** en una reserva (sí en una solicitud de centro de costo, otro dominio) | **Eliminado** |
+
+### El vocabulario nuevo
+
+`mapRawTripStatus` (`src/lib/tripStatus.ts:82`) es la única normalización y su tabla quedó documentada
+en el propio archivo. La regla de cancelación (`isCompanyCancellableStatus`, `:212`) sale de la lista
+del backend (`CANCELLABLE_SCHEDULED_TRIP_STATUSES`, `functions/src/b2b/scheduledTripStatus.ts:103`):
+
+| Crudo | Normalizado | ¿Se cancela? | Paso de la escalera |
+|---|---|---|---|
+| `pending_approval` | `pending_approval` | sí | 0 · Reserva creada |
+| `available` | `available` | sí | 0 · Reserva creada |
+| `offered` | `offered` | sí | 1 · Ofrecida |
+| `driver_rejected` | `driver_rejected` | sí | 0 · Reserva creada (volvió al pool) |
+| `driver_assigned` | `driver_assigned` | sí | 2 · Conductor asignado |
+| `dispatched` | `dispatched` | no: ya es un viaje | 3 · Despachada |
+| `completed` | `completed` | no | 4 · Completada |
+| `expired` | `expired` | no | — (fuera de la escalera) |
+| `cancelled` | `cancelled` | no | — (fuera de la escalera) |
+| `requested` · `accepted` · `seeking_driver` · `driver_arrived` · `arrived` · `in_progress` (de `trips`) | `dispatched` | no | 3 · Despachada |
+| ausente o desconocido | `available` | sí | 0 · Reserva creada |
+
+La consola no baja el estado de una reserva por el detalle del viaje: si existe un viaje vivo
+(`listCompanyTrips`), la reserva ya se despachó, y sólo `completed` o `cancelled` del viaje la bajan a
+un terminal (`src/app/page.tsx:446-458`). El «en camino / en punto / a bordo» se lee en el mapa y en la
+bitácora del servidor, no en el estado de la reserva.
+
+### `expired` ya no se lee como `cancelled`
+
+| | Badge | Color | Línea de tiempo | Filtro |
+|---|---|---|---|---|
+| `expired` | «Vencida» | violeta `#F3F0FF` / `#7C3AED` (`page.tsx:141`) | «Reserva vencida: llegó la fecha límite sin ejecutarse y el techo se liberó.» | `expired` |
+| `cancelled` | «Cancelada» | salmón `#FDEDE8` / `#FA896B` | «Reserva cancelada: no se ejecutó y el techo comprometido se liberó.» | `cancelled` |
+
+Las dos están fuera de la lista de cancelables y las dos quedan fuera del KPI de gasto, pero se leen
+distinto. La escalera no las marca como alcanzadas: `getLifecycleStepIndex` devuelve `-1` para las dos
+(`src/lib/tripStatus.ts:141`), porque un terminal no es un paso hacia adelante.
+
+### La escalera
+
+La escalera vieja tenía nueve pasos e incluía cuatro que ninguna reserva escribe (`enRoute`,
+`driverArrived`, `inService`, `arrived`) y uno inventado (`confirmed`). La nueva tiene cinco, todos
+derivados de estados reales:
+
+```ts
+LIFECYCLE_STEPS = [
+  "available",       // Reserva creada (en el pool)
+  "offered",         // Ofrecida a un conductor
+  "driver_assigned", // Conductor asignado
+  "dispatched",      // Despachada (en viaje)
+  "completed",       // Completada
+];
+```
+
+`pending_approval` y `driver_rejected` caen al paso 0: la reserva existe y no tiene conductor
+comprometido. `cancelled` y `expired` no están en la escalera.
+
+### F5 sigue dando lo mismo
+
+La regla de F5 no cambió de comportamiento: para los nueve estados crudos que el backend escribe,
+`isCompanyCancellableStatus` devuelve lo mismo que en `HEAD`. Lo que cambió es la lista interna, que
+ahora nombra cada estado real en vez de tres cubos (`requested`, `seeking_driver`, `assigned`).
+También se mantiene la idempotencia de `mapRawTripStatus` sobre todo valor normalizado, así que la
+escalera puede recibir el estado ya normalizado de `liveSelectedRequest`.
+
+### Qué NO se tocó
+
+- El reparto de callables de `handleCancelRequest` (F5): sigue eligiendo
+  `cancelScheduledTrip` / `cancelCompanyReservation` igual, y el botón sigue colgando de
+  `isCompanyCancellableStatus` (`page.tsx:2701`).
+- El selector de centros y el techo de F6.
+- `src/types/b2b.ts` queda fuera de esta entrega: su `B2BRequestStatus` describe el documento legado de
+  `b2bRequests` (colección sin escritor desde el 2026-11-06). `page.tsx` deriva un `PortalRequest` con el
+  estado normalizado, en lugar de forzar el tipo viejo.
+- La lectura de `b2bRequests`: sigue abierta, y un documento viejo con un estado que el backend no
+  escribe cae en `available`, el estado en que nace una reserva.
+
+### Cómo se verifica
+
+```bash
+npx eslint src/lib/tripStatus.ts src/app/page.tsx   # tripStatus limpio; page.tsx 60 errores + 16 warnings, los de HEAD
+npx tsc --noEmit                                    # exit 0
+```
+
+La matriz crudo → normalizado → cancelable se corre sin navegador, compilando el archivo real con
+`tsc` y comparando la regla de F5 contra una copia de `HEAD` (scratch fuera del worktree):
+
+```text
+crudo              -> normalizado       cancelable  paso  escritor
+------------------    ----------------   ----------  ----  --------
+pending_approval   -> pending_approval   sí          0     createScheduledTripForCompany (CF-84)
+                     ^ paso: Reserva creada (en el pool)
+available          -> available          sí          0     createScheduledTrip (CF-48) / releaseScheduledTrip
+                     ^ paso: Reserva creada (en el pool)
+offered            -> offered            sí          1     offerScheduledTrip (CF-59)
+                     ^ paso: Ofrecida a un conductor
+driver_rejected    -> driver_rejected    sí          0     rejectScheduledTrip (CF-58)
+                     ^ paso: Reserva creada (en el pool)
+driver_assigned    -> driver_assigned    sí          2     acceptScheduledTrip (CF-57)
+                     ^ paso: Conductor asignado
+dispatched         -> dispatched         no          3     dispatchScheduledTrip (CF-62)
+                     ^ paso: Despachada (en viaje)
+completed          -> completed          no          4     cierre del viaje
+                     ^ paso: Completada
+expired            -> expired            no          -1    expireScheduledTrips
+cancelled          -> cancelled          no          -1    cancelScheduledTrip (CF-54)
+requested          -> dispatched         no          3     trips (listCompanyTrips)
+                     ^ paso: Despachada (en viaje)
+accepted           -> dispatched         no          3     trips (listCompanyTrips)
+                     ^ paso: Despachada (en viaje)
+seeking_driver     -> dispatched         no          3     trips (listCompanyTrips)
+                     ^ paso: Despachada (en viaje)
+driver_arrived     -> dispatched         no          3     trips (listCompanyTrips)
+                     ^ paso: Despachada (en viaje)
+arrived            -> dispatched         no          3     trips (listCompanyTrips)
+                     ^ paso: Despachada (en viaje)
+in_progress        -> dispatched         no          3     trips (listCompanyTrips)
+                     ^ paso: Despachada (en viaje)
+(ausente)          -> available          sí          0     reserva recién creada
+                     ^ paso: Reserva creada (en el pool)
+                   -> available          sí          0     valor vacío
+                     ^ paso: Reserva creada (en el pool)
+otro-inventado     -> available          sí          0     desconocido
+                     ^ paso: Reserva creada (en el pool)
+
+F5 (cancelación) antes vs después, sobre los estados crudos reales:
+  pending_approval   antes=true  después=true
+  available          antes=true  después=true
+  offered            antes=true  después=true
+  driver_rejected    antes=true  después=true
+  driver_assigned    antes=true  después=true
+  dispatched         antes=false después=false
+  completed          antes=false después=false
+  expired            antes=false después=false
+  cancelled          antes=false después=false
+
+matriz OK: 18 filas, 0 discrepancias; F5 idéntico en 9 estados
+```
+
+`expired` aparece como `expired` y ya no como `cancelled`; la matriz falla si vuelve a colapsarse, si
+un estado cancelable deja de serlo o si un paso de la escalera deja de ser un estado real.

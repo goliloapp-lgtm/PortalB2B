@@ -48,14 +48,17 @@ import {
 } from "@/lib/firebase";
 import { useAuth } from "@/context/AuthContext";
 import { useLanguage } from "@/context/LanguageContext";
-import { B2BRequestStatus, B2BServiceRequest, CostCenter } from "@/types/b2b";
+import { B2BServiceRequest, CostCenter } from "@/types/b2b";
 import GoogleTripTrackingMap from "@/components/maps/GoogleTripTrackingMap";
 import { formatFriendlyError } from "@/lib/friendlyError";
 import {
   mapRawTripStatus,
   getLifecycleStepIndex,
   isCompanyCancellableStatus,
+  isAwaitingDriverStatus,
+  isTerminalStatus,
   LIFECYCLE_STEPS,
+  type ScheduledTripStatus,
 } from "@/lib/tripStatus";
 import {
   Wallet,
@@ -86,67 +89,62 @@ import {
 } from "lucide-react";
 import toast from "react-hot-toast";
 
+/**
+ * Una reserva tal como la muestra la consola: el estado ya normalizado por
+ * `mapRawTripStatus`, no el crudo de Firestore. `B2BServiceRequest` sigue tipando
+ * el documento de entrada (`rawRequests`), cuyo `status` es el que dejaron
+ * documentos que ya nadie escribe.
+ */
+type PortalRequest = Omit<B2BServiceRequest, "status"> & {
+  status: ScheduledTripStatus;
+};
+
 const STATUS_LABELS: Record<
-  B2BRequestStatus,
+  ScheduledTripStatus,
   { label: string; bg: string; text: string }
 > = {
-  requested: {
-    label: "Solicitada",
+  pending_approval: {
+    label: "Pendiente de Aprobación",
+    bg: "bg-[#FEF5E5]",
+    text: "text-[#B45309]",
+  },
+  available: {
+    label: "Buscando Conductor",
     bg: "bg-[#FEF5E5]",
     text: "text-[#FFAE1F]",
   },
-  seeking_driver: {
-    label: "Buscando Conductor",
+  offered: {
+    label: "Ofrecida a un Conductor",
+    bg: "bg-[#ECF2FF]",
+    text: "text-[#5D87FF]",
+  },
+  driver_rejected: {
+    label: "Rechazada por el Conductor",
     bg: "bg-[#FEF5E5]",
     text: "text-[#D97706]",
   },
-  confirmed: {
-    label: "Confirmada",
-    bg: "bg-[#E8F7FF]",
-    text: "text-[#49BEFF]",
-  },
-  assigned: {
+  driver_assigned: {
     label: "Conductor Asignado",
     bg: "bg-[#ECF2FF]",
     text: "text-[#5D87FF]",
   },
-  enRoute: {
-    label: "En Camino al Origen",
-    bg: "bg-[#ECF2FF]",
-    text: "text-[#5D87FF]",
-  },
-  driverArrived: {
-    label: "Conductor en Punto",
-    bg: "bg-[#E8F7FF]",
-    text: "text-[#2563EB]",
-  },
-  inService: {
-    label: "En Curso (Viajando)",
+  dispatched: {
+    label: "Despachada (en Viaje)",
     bg: "bg-[#E8F7FF]",
     text: "text-[#0284C7]",
   },
-  arrived: {
-    label: "Llegada a Destino",
-    bg: "bg-[#E6FFFA]",
-    text: "text-[#0D9488]",
-  },
   completed: {
-    label: "Completado",
+    label: "Completada",
     bg: "bg-[#E6FFFA]",
     text: "text-[#13DEB9]",
   },
-  invoiced: {
-    label: "Facturado",
-    bg: "bg-[#E6FFFA]",
-    text: "text-[#13DEB9]",
+  expired: {
+    label: "Vencida",
+    bg: "bg-[#F3F0FF]",
+    text: "text-[#7C3AED]",
   },
   cancelled: {
-    label: "Cancelado",
-    bg: "bg-[#FDEDE8]",
-    text: "text-[#FA896B]",
-  },
-  rejected: {
-    label: "Rechazado",
+    label: "Cancelada",
     bg: "bg-[#FDEDE8]",
     text: "text-[#FA896B]",
   },
@@ -184,7 +182,7 @@ export default function CorporatePortalPage() {
   const [savingLimitId, setSavingLimitId] = useState<string | null>(null);
   const [loadingRequests, setLoadingRequests] = useState(true);
   const [selectedRequest, setSelectedRequest] =
-    useState<B2BServiceRequest | null>(null);
+    useState<PortalRequest | null>(null);
   const [periodFilter, setPeriodFilter] = useState<"week" | "month" | "all">(
     "month"
   );
@@ -436,7 +434,7 @@ export default function CorporatePortalPage() {
     return () => unsubscribe();
   }, [user, company?.id, loading]);
 
-  const mappedScheduledRequests = useMemo<B2BServiceRequest[]>(() => {
+  const mappedScheduledRequests = useMemo<PortalRequest[]>(() => {
     return scheduledTrips.map((st) => {
       const liveTrip = companyTrips.find(
         (t) =>
@@ -445,8 +443,19 @@ export default function CorporatePortalPage() {
           t.tripId === st.scheduledTripId ||
           t.tripId === (st as any).id
       );
-      const effectiveRawStatus = liveTrip?.status || st.status;
-      const mappedStatus = mapRawTripStatus(effectiveRawStatus);
+      // Un viaje vivo sólo existe después del despacho: mientras corre, la
+      // reserva está despachada, y el viaje sólo puede bajarla a un terminal.
+      // El detalle del viaje (en camino, en punto, a bordo) se lee en el mapa y
+      // en la bitácora, no en el estado de la reserva.
+      const liveTripStatus = liveTrip?.status
+        ? mapRawTripStatus(liveTrip.status)
+        : null;
+      const mappedStatus: ScheduledTripStatus =
+        liveTripStatus === "completed" || liveTripStatus === "cancelled"
+          ? liveTripStatus
+          : liveTrip
+          ? "dispatched"
+          : mapRawTripStatus(st.status);
 
       const effectiveTripId =
         liveTrip?.tripId ||
@@ -460,8 +469,7 @@ export default function CorporatePortalPage() {
       );
       const trav = travellersList.find((t) => t.travellerId === st.travellerId);
 
-      const isSeeking =
-        mappedStatus === "seeking_driver" || mappedStatus === "requested";
+      const isSeeking = isAwaitingDriverStatus(mappedStatus);
       const driverId = isSeeking
         ? undefined
         : liveTrip?.driverId || (st as any).driverId || veh?.driverId || undefined;
@@ -553,7 +561,7 @@ export default function CorporatePortalPage() {
         assignedVehiclePlate: vehiclePlate,
         status: mappedStatus,
         notes: (liveTrip as any)?.notes,
-      } as B2BServiceRequest;
+      } as PortalRequest;
     });
   }, [
     scheduledTrips,
@@ -568,11 +576,10 @@ export default function CorporatePortalPage() {
     user?.uid,
   ]);
 
-  const requests = useMemo<B2BServiceRequest[]>(() => {
-    const list: B2BServiceRequest[] = rawRequests.map((r) => {
+  const requests = useMemo<PortalRequest[]>(() => {
+    const list: PortalRequest[] = rawRequests.map((r) => {
       const resolvedStatus = mapRawTripStatus(r.status);
-      const isSeeking =
-        resolvedStatus === "seeking_driver" || resolvedStatus === "requested";
+      const isSeeking = isAwaitingDriverStatus(resolvedStatus);
       const vehId = r.assignedVehicleId;
       const veh = vehId ? vehiclesMap[vehId] : undefined;
 
@@ -597,8 +604,7 @@ export default function CorporatePortalPage() {
       );
 
       const resolvedStatus = sReq.status;
-      const isSeeking =
-        resolvedStatus === "seeking_driver" || resolvedStatus === "requested";
+      const isSeeking = isAwaitingDriverStatus(resolvedStatus);
 
       if (existingIdx >= 0) {
         list[existingIdx] = {
@@ -629,7 +635,7 @@ export default function CorporatePortalPage() {
       }
     }
 
-    const getCreatedTimestamp = (req: B2BServiceRequest): number => {
+    const getCreatedTimestamp = (req: PortalRequest): number => {
       const c = req.createdAt as any;
       if (typeof c === "number" && c > 0) return c;
       if (typeof c?.toMillis === "function") return c.toMillis();
@@ -721,7 +727,8 @@ export default function CorporatePortalPage() {
       if (
         r.assignedDriverId &&
         r.status !== "completed" &&
-        r.status !== "cancelled"
+        r.status !== "cancelled" &&
+        r.status !== "expired"
       ) {
         ids.add(r.assignedDriverId);
       }
@@ -809,26 +816,17 @@ export default function CorporatePortalPage() {
   }, [requests, periodFilter, statusFilter, searchTerm]);
 
   const kpis = useMemo(() => {
-    const activeStatuses = [
-      "requested",
-      "seeking_driver",
-      "confirmed",
-      "assigned",
-      "enRoute",
-      "driverArrived",
-      "inService",
-      "arrived",
-    ];
-    const inProgress = filteredRequests.filter((r) =>
-      activeStatuses.includes(r.status)
+    const inProgress = filteredRequests.filter(
+      (r) => !isTerminalStatus(r.status)
     ).length;
 
     const completed = filteredRequests.filter(
-      (r) => r.status === "completed" || r.status === "invoiced"
+      (r) => r.status === "completed"
     ).length;
 
+    // Una reserva vencida no se cobra, igual que una cancelada.
     const billable = filteredRequests.filter(
-      (r) => r.status !== "cancelled" && r.status !== "rejected"
+      (r) => r.status !== "cancelled" && r.status !== "expired"
     );
 
     const totalSpend = billable.reduce(
@@ -854,12 +852,14 @@ export default function CorporatePortalPage() {
     id: string;
     tripId?: string;
     scheduledTripId?: string;
-    status: B2BRequestStatus;
+    status: ScheduledTripStatus;
     interruptionReason?: string;
     notes?: string;
   }) => {
-    const base = STATUS_LABELS[req.status] || STATUS_LABELS.requested;
-    if (req.status !== "seeking_driver") return base;
+    const base = STATUS_LABELS[req.status] ?? STATUS_LABELS.available;
+    if (req.status !== "available" && req.status !== "driver_rejected") {
+      return base;
+    }
     const isReassigning =
       Boolean(req.interruptionReason) ||
       Boolean(req.notes);
@@ -872,8 +872,9 @@ export default function CorporatePortalPage() {
     liveSelectedRequest &&
       !liveSelectedRequest.assignedDriverId &&
       !(liveSelectedRequest as any)?.tripId &&
-      (liveSelectedRequest.status === "requested" ||
-        (liveSelectedRequest.status === "seeking_driver" &&
+      (liveSelectedRequest.status === "pending_approval" ||
+        ((liveSelectedRequest.status === "available" ||
+          liveSelectedRequest.status === "driver_rejected") &&
           !(liveSelectedRequest as any)?.interruptionReason &&
           !(liveSelectedRequest as any)?.notes))
   );
@@ -2049,14 +2050,15 @@ export default function CorporatePortalPage() {
                 className="text-xs border border-[#DFE5EF] rounded-[6px] px-3 py-2 bg-white text-[#2A3547]"
               >
                 <option value="all">Todos los estados</option>
-                <option value="requested">Solicitada</option>
-                <option value="seeking_driver">Buscando Conductor</option>
-                <option value="assigned">Conductor Asignado</option>
-                <option value="enRoute">En Camino al Origen</option>
-                <option value="driverArrived">Conductor en Punto</option>
-                <option value="inService">En Curso</option>
-                <option value="completed">Completado</option>
-                <option value="cancelled">Cancelado</option>
+                <option value="pending_approval">Pendiente de Aprobación</option>
+                <option value="available">Buscando Conductor</option>
+                <option value="offered">Ofrecida a un Conductor</option>
+                <option value="driver_rejected">Rechazada por el Conductor</option>
+                <option value="driver_assigned">Conductor Asignado</option>
+                <option value="dispatched">Despachada (en Viaje)</option>
+                <option value="completed">Completada</option>
+                <option value="expired">Vencida</option>
+                <option value="cancelled">Cancelada</option>
               </select>
 
               <select
@@ -2180,8 +2182,12 @@ export default function CorporatePortalPage() {
                             </div>
                           ) : (
                             <span className="inline-block px-2 py-0.5 rounded border border-[#FFAE1F]/50 text-[#D97706] text-[11px] font-semibold">
-                              {req.status === "seeking_driver"
+                              {req.status === "available" ||
+                              req.status === "offered" ||
+                              req.status === "driver_rejected"
                                 ? "Buscando conductor..."
+                                : req.status === "pending_approval"
+                                ? "Pendiente de aprobación"
                                 : "Sin asignar"}
                             </span>
                           )}
@@ -2337,17 +2343,29 @@ export default function CorporatePortalPage() {
                 Línea de Tiempo en Vivo (Sincronizada con Realtime Database)
               </span>
               <div className="bg-[#F8FAFC] p-4 rounded-[8px] border border-[#E5EAEF] space-y-2.5">
+                {(liveSelectedRequest.status === "cancelled" ||
+                  liveSelectedRequest.status === "expired") && (
+                  <div
+                    className={`p-3 rounded-[7px] border text-xs font-semibold ${
+                      liveSelectedRequest.status === "expired"
+                        ? "bg-[#F3F0FF] border-[#7C3AED]/40 text-[#5B21B6]"
+                        : "bg-[#FDEDE8] border-[#FA896B]/50 text-[#B91C1C]"
+                    }`}
+                  >
+                    {liveSelectedRequest.status === "expired"
+                      ? "Reserva vencida: llegó la fecha límite sin ejecutarse y el techo se liberó."
+                      : "Reserva cancelada: no se ejecutó y el techo comprometido se liberó."}
+                  </div>
+                )}
                 {LIFECYCLE_STEPS.map((st, idx) => {
                   const activeStepIdx = getLifecycleStepIndex(
                     liveSelectedRequest.status
                   );
                   const isCompletedStep =
                     liveSelectedRequest.status === "completed" ||
-                    liveSelectedRequest.status === "invoiced" ||
                     idx < activeStepIdx;
                   const isCurrentStep =
                     liveSelectedRequest.status !== "completed" &&
-                    liveSelectedRequest.status !== "invoiced" &&
                     idx === activeStepIdx;
                   return (
                     <div key={st.status}>
@@ -2380,7 +2398,8 @@ export default function CorporatePortalPage() {
               </div>
             </div>
 
-            {liveSelectedRequest.status === "seeking_driver" &&
+            {(liveSelectedRequest.status === "available" ||
+              liveSelectedRequest.status === "driver_rejected") &&
               (liveSelectedRequest.notes ||
                 (liveSelectedRequest as any).interruptionReason) && (
                 <div className="p-3 rounded-[7px] bg-[#FEF5E5] border border-[#FFAE1F]/50 text-xs text-[#92400E]">
