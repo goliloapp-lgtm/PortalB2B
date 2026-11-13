@@ -464,3 +464,20 @@ matriz OK: 18 filas, 0 discrepancias; F5 idéntico en 9 estados
 
 `expired` aparece como `expired` y ya no como `cancelled`; la matriz falla si vuelve a colapsarse, si
 un estado cancelable deja de serlo o si un paso de la escalera deja de ser un estado real.
+
+## F7b — El tipo compartido de estados se parte en real y heredado
+
+`src/types/b2b.ts` seguía declarando el vocabulario viejo como si fuera el único. Un
+tipo compartido que miente es peor que no tenerlo: el próximo componente que lo use
+vuelve a pintar `confirmed` o `enRoute` sin que nadie lo note.
+
+- `B2BRequestStatus` ahora son los nueve estados que el backend escribe:
+  `pending_approval`, `available`, `offered`, `driver_rejected`, `driver_assigned`,
+  `dispatched`, `completed`, `expired`, `cancelled`.
+- `LegacyB2BRequestStatus` queda marcado `@deprecated` con los doce valores viejos, para
+  tipar documentos heredados que todavía se leen. No se usa para escribir.
+- `B2BAnyRequestStatus` es la unión, y es el tipo del campo `status` de
+  `B2BServiceRequest`, que tipa documentos crudos (nuevos o viejos).
+
+Verificación: `npx tsc --noEmit` exit 0, sin errores. El único consumidor del tipo es
+`src/app/page.tsx`, que ya deriva su propio `PortalRequest` desde el estado normalizado.

@@ -117,19 +117,44 @@ export interface FrozenFareBreakdown {
   legCount?: number;
 }
 
+/**
+ * Los estados que el backend escribe hoy en `scheduledTrips`.
+ *
+ * Es el vocabulario de `functions/src/b2b/scheduledTripStatus.ts`: el backend no
+ * escribe ningún otro. La consola los muestra tal cual (`src/lib/tripStatus.ts`).
+ */
 export type B2BRequestStatus =
+  | "pending_approval"
+  | "available"
+  | "offered"
+  | "driver_rejected"
+  | "driver_assigned"
+  | "dispatched"
+  | "completed"
+  | "expired"
+  | "cancelled";
+
+/**
+ * @deprecated Vocabulario del espejo legado `b2bRequests` y de la UI anterior
+ * (F7, 2026-11-13). Ninguna reserva nueva escribe estos valores: `requested`,
+ * `seeking_driver`, `confirmed`, `assigned`, `enRoute`, `driverArrived`,
+ * `inService`, `arrived`, `invoiced` y `rejected` son sólo historia. Existe para
+ * tipar documentos viejos que todavía se leen, no para escribir.
+ */
+export type LegacyB2BRequestStatus =
   | "requested"
-  | "seeking_driver" // Conductor B2B se retiró (markDriverUnavailable), techo intacto
+  | "seeking_driver"
   | "confirmed"
   | "assigned"
   | "enRoute"
   | "driverArrived"
   | "inService"
   | "arrived"
-  | "completed"
   | "invoiced"
-  | "cancelled"
   | "rejected";
+
+/** Lo que puede traer un documento, nuevo o heredado. Nada más. */
+export type B2BAnyRequestStatus = B2BRequestStatus | LegacyB2BRequestStatus;
 
 export type VehicleCategory = "suv" | "pickup" | "microbus";
 export type B2BVehicleType = VehicleCategory;
@@ -185,7 +210,7 @@ export interface B2BServiceRequest {
   assignedDriverPhone?: string;
   assignedVehicleId?: string;
   assignedVehiclePlate?: string;
-  status: B2BRequestStatus;
+  status: B2BAnyRequestStatus;
   notes?: string;
   createdAt?: Timestamp | any;
   updatedAt?: Timestamp | any;
