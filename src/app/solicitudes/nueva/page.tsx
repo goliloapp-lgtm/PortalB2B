@@ -648,7 +648,10 @@ export default function NuevaSolicitudPortalB2BPage() {
           company.contactName ||
           "Viajero Corporativo";
         const manualPhone =
-          passengerPhone.trim() || company.phone || "+503 7000-0000";
+          // El teléfono de contacto de la empresa vive en `contactPhone`; `phone` es
+          // el campo legacy. Y no se inventa un número: un pasajero con un teléfono
+          // falso es peor que uno sin teléfono, que el portal ya sabe mostrar.
+          passengerPhone.trim() || company.contactPhone || company.phone || "";
         try {
           const createdTrav = await createTravellerCallable({
             name: manualName,

@@ -2273,7 +2273,7 @@ export default function CorporatePortalPage() {
                   Dirección Fiscal
                 </span>
                 <span className="font-bold text-[#2A3547] mt-0.5 block">
-                  {company.address}
+                  {company.contactAddress || company.address}
                 </span>
               </div>
             </div>

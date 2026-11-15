@@ -30,6 +30,11 @@ export interface B2BCompany {
   contactPerson?: string;
   phone: string;
   contactPhone?: string;
+  /** Los campos de contacto del contrato. El documento los guarda así, y el panel
+   * los escribe con esos nombres; `phone`/`address`/`email`/`whatsapp` son legacy. */
+  contactAddress?: string;
+  contactWhatsapp?: string;
+  contactEmail?: string;
   whatsapp: string;
   email: string;
   address: string;
