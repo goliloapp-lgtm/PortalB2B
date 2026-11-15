@@ -3,6 +3,45 @@
  * Firestore, red o validaciones) en un mensaje claro, amable y en español
  * comprensible para cualquier usuario no técnico.
  */
+/**
+ * La negativa P4: la reserva no entra en el techo del centro de costo.
+ *
+ * El servidor la cuenta entera —techo, consumido, retenido y lo que pide la
+ * reserva— en inglés. El empleado de la empresa necesita esos números para saber
+ * qué hacer: pedir que amplíen el techo, esperar a que se libere una reserva o
+ * elegir un servicio más económico.
+ *
+ * @param {string} combined El texto del servidor en minúsculas.
+ * @return {string | undefined} La frase, o `undefined` si no es esta negativa.
+ */
+function readCeilingRefusal(combined: string): string | undefined {
+  if (!combined.includes("would be occupied against it")) return undefined;
+
+  const number = "([0-9]+(?:\\.[0-9]+)?)";
+  const pick = (pattern: string): number | undefined => {
+    const match = new RegExp(pattern.replace("%s", number)).exec(combined);
+    return match ? Number(match[1]) : undefined;
+  };
+
+  const needs = pick("needs %s");
+  const ceiling = pick("ceiling is %s");
+  const realised = pick("%s is realised") ?? 0;
+  const reserved = pick("%s is reserved") ?? 0;
+  const money = (value: number): string => `$${value.toFixed(2)}`;
+  const head =
+    "No se puede registrar esta reserva: supera el techo de consumo del centro de costo";
+
+  if (needs === undefined || ceiling === undefined) return `${head}.`;
+
+  const available = ceiling - realised - reserved;
+  return (
+    `${head}. Techo ${money(ceiling)}, consumido ${money(realised)}, ` +
+    `retenido ${money(reserved)} — disponibles ${money(available)} — y esta ` +
+    `reserva pide ${money(needs)}. Pedile a la plataforma ampliar el techo, ` +
+    "esperá a que se libere una reserva o elegí un servicio más económico."
+  );
+}
+
 export function formatFriendlyError(
   err: unknown,
   fallbackMessage = "No pudimos completar tu solicitud en este momento. Por favor intenta nuevamente."
@@ -17,7 +56,18 @@ export function formatFriendlyError(
       : "";
   const rawCode =
     typeof (err as any)?.code === "string" ? (err as any).code : "";
-  const combined = `${rawCode} ${rawMessage}`.toLowerCase();
+  // EL DETALLE DEL SERVIDOR TAMBIÉN CUENTA. Las negativas de negocio —techo de
+  // consumo, techo del centro de costo, anticipación— viajan en
+  // `err.details.message`, y hasta ahora este traductor no lo leía: ninguna regla
+  // podía reconocerlas y el empleado recibía el genérico «no pudimos completar tu
+  // solicitud» sin saber qué pasaba.
+  const serverDetail =
+    typeof (err as any)?.details === "string"
+      ? (err as any).details
+      : typeof (err as any)?.details?.message === "string"
+      ? (err as any).details.message
+      : "";
+  const combined = `${rawCode} ${rawMessage} ${serverDetail}`.toLowerCase();
 
   // 1. Anticipación mínima de reserva (minimumBookingLeadMinutes)
   if (
@@ -44,13 +94,21 @@ export function formatFriendlyError(
     return "Por el momento tu empresa tiene habilitadas únicamente las reservas programadas. Por favor selecciona una fecha y hora de salida.";
   }
 
+  // 0. Techo de consumo (P4): la reserva no entra. Va primero porque es la única
+  // negativa que trae los cuatro números que el empleado necesita para decidir.
+  const ceilingRefusal = readCeilingRefusal(combined);
+  if (ceilingRefusal !== undefined) return ceilingRefusal;
+
   // 3. Presupuesto / Techo del centro de costo agotado
+  // Sólo las frases con las que el backend NOMBRA el techo. Antes entraba cualquier
+  // mensaje que dijera «budget» o «presupuesto», y el rechazo de `updateCompany`
+  // termina con «the balance to the budget ledger»: cualquier invalid-argument se
+  // mostraba como techo agotado y la causa real se perdía.
   if (
     combined.includes("resource-exhausted") ||
-    combined.includes("budget") ||
-    combined.includes("ceiling") ||
-    combined.includes("techo de consumo") ||
-    combined.includes("presupuesto")
+    combined.includes("budgetlimit") ||
+    combined.includes("raise the ceiling") ||
+    combined.includes("techo de consumo")
   ) {
     return "El departamento o centro de costo seleccionado ha alcanzado su presupuesto máximo para este periodo. Solicita al administrador de tu empresa ampliar el límite.";
   }
@@ -88,13 +146,15 @@ export function formatFriendlyError(
   }
 
   // 8. Cancelación no permitida por estado del viaje
+  // Sólo las frases con las que el backend NIEGA la cancelación. Antes bastaba un
+  // mensaje que dijera «cancel» y trajera el código del error.
   if (
-    (combined.includes("cancel") || combined.includes("cancelar")) &&
-    (combined.includes("already") ||
-      combined.includes("status") ||
-      combined.includes("in_progress") ||
-      combined.includes("completed") ||
-      combined.includes("failed-precondition"))
+    combined.includes("cannot be cancelled") ||
+    combined.includes("cannot be canceled") ||
+    combined.includes("already in progress") ||
+    combined.includes("already completed") ||
+    combined.includes("is cancelled by the trip path") ||
+    combined.includes("nothing left to cancel")
   ) {
     return "No es posible cancelar este traslado porque ya se encuentra en curso o ya fue finalizado.";
   }
@@ -201,7 +261,7 @@ export function formatFriendlyError(
 
   const looksTechnicalOrEnglish =
     /requires|must be|nothing was written|httpserror|firebase|invalid-argument|failed-precondition|already-exists|undefined|null|uid|callable|collection|document|\[4\d\d\]|\[5\d\d\]/i.test(
-      rawMessage
+      combined
     );
 
   if (!looksTechnicalOrEnglish && cleanedSpanish.length > 4) {
