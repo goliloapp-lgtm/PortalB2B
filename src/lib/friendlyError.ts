@@ -42,6 +42,43 @@ function readCeilingRefusal(combined: string): string | undefined {
   );
 }
 
+/**
+ * La negativa de cubrimiento: ninguna categoría con flota atiende la cantidad.
+ *
+ * El servidor la escribe en inglés —«13 passengers do not fit in any vehicle with
+ * fleet in countries/sv (the largest carries 12). Categories with fleet: suv,
+ * microbus.»— y nombra el máximo REAL del país. Traducirla con un «12» fijo
+ * mentiría en cuanto cambie la flota: los números que se muestran son los del
+ * mensaje del servidor, y si no vinieron se omite el número en lugar de inventarlo.
+ *
+ * @param {string} combined El texto del servidor en minúsculas.
+ * @return {string | undefined} La frase, o `undefined` si no es esta negativa.
+ */
+function readPassengerCoverageRefusal(combined: string): string | undefined {
+  if (!combined.includes("do not fit in any vehicle with fleet")) {
+    return undefined;
+  }
+
+  const count = /([0-9]+) passengers? do not fit/.exec(combined);
+  const capacity = /the largest carries ([0-9]+)/.exec(combined);
+  const fleet = /categories with fleet: ([^.]+)\./.exec(combined);
+
+  const head =
+    count === null
+      ? "Ninguna categoría con flota cubre esta cantidad de pasajeros"
+      : `Para ${count[1]} pasajeros no hay ninguna categoría con flota`;
+  const capacityText =
+    capacity === null ? "" : `: la unidad más amplia lleva ${capacity[1]}`;
+  const fleetText =
+    fleet === null ? "" : `. Categorías con flota: ${fleet[1].trim()}`;
+
+  return (
+    `${head}${capacityText}${fleetText}. Divide la solicitud en varios traslados ` +
+    "con menos pasajeros o contáctanos por WhatsApp o teléfono y con gusto " +
+    "coordinaremos tu traslado."
+  );
+}
+
 export function formatFriendlyError(
   err: unknown,
   fallbackMessage = "No pudimos completar tu solicitud en este momento. Por favor intenta nuevamente."
@@ -111,6 +148,35 @@ export function formatFriendlyError(
     combined.includes("techo de consumo")
   ) {
     return "El departamento o centro de costo seleccionado ha alcanzado su presupuesto máximo para este periodo. Solicita al administrador de tu empresa ampliar el límite.";
+  }
+
+  // La categoría elegida ya no pertenece al conjunto asignable: el alta la valida
+  // contra el mismo conjunto que publica `listScheduledTripCategories`. Va ANTES de
+  // los buckets genéricos, que sí la tragarían: el rechazo nombra `categoryId` (y el
+  // bucket de categoría respondería «no pudimos calcular la tarifa») y viaja con
+  // `invalid-argument`, que el cierre técnico convertía en el texto de reserva.
+  if (
+    combined.includes("which is not one of the categories") ||
+    combined.includes("must be a non-empty category id")
+  ) {
+    return "La categoría elegida ya no está disponible; elegí otra.";
+  }
+
+  // Ninguna categoría con flota cubre la cantidad de pasajeros. Va ANTES del
+  // bucket de capacidad, que responde «más de 12» a cualquier mensaje que nombre
+  // `passengerCount`: el máximo real lo dice el servidor, no esta pantalla.
+  const coverageRefusal = readPassengerCoverageRefusal(combined);
+  if (coverageRefusal !== undefined) return coverageRefusal;
+
+  // El país no tiene flota que atienda la reserva. La carga de categorías —y el
+  // alta— lo dicen sin que exista un vehículo elegido: el bucket de
+  // conductor/vehículo ve «vehicle» + «failed-precondition» y contestaría que la
+  // unidad elegida no está disponible, cuando no se eligió ninguna.
+  if (
+    combined.includes("no active vehicle in any category offered to companies") ||
+    combined.includes("has no active vehicles in country")
+  ) {
+    return "Todavía no hay vehículos disponibles para reservas en tu país. Contáctanos por WhatsApp o teléfono y con gusto coordinamos tu traslado.";
   }
 
   // 4. Capacidad máxima de pasajeros (> 12)

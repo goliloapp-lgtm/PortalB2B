@@ -95,8 +95,29 @@ import toast from "react-hot-toast";
  * el documento de entrada (`rawRequests`), cuyo `status` es el que dejaron
  * documentos que ya nadie escribe.
  */
-type PortalRequest = Omit<B2BServiceRequest, "status"> & {
+type PortalRequest = Omit<
+  B2BServiceRequest,
+  "status" | "vehicleCategory" | "tariffApplied"
+> & {
   status: ScheduledTripStatus;
+  /**
+   * La categoría REAL de la reserva: el `categoryId` del catálogo, no la unión de
+   * tres valores. Colapsar `van` o `bus-coaster` a `"suv"` describía otro vehículo.
+   */
+  vehicleCategory: string;
+  /** El nombre de la categoría, cuando la empresa tiene tarifa para ella. */
+  categoryName?: string;
+  /**
+   * La tarifa aplicada: la categoría REAL y la tarifa por km SOLO cuando se conoce
+   * para esa categoría. Antes se escribían la tarifa y el mínimo publicados del SUV
+   * para cualquier reserva, así que una `van` mostraba el precio de otro vehículo.
+   */
+  tariffApplied: {
+    category: string;
+    ratePerKm?: number;
+    minFare?: number;
+    calculatedAmount: number;
+  };
 };
 
 const STATUS_LABELS: Record<
@@ -483,19 +504,25 @@ export default function CorporatePortalPage() {
         ? undefined
         : veh?.plate || (st as any).vehiclePlate || undefined;
 
-      const rawCat = String(st.categoryId || "suv").toLowerCase();
-      let vehicleCategory: "suv" | "pickup" | "microbus" = "suv";
-      if (
-        rawCat.includes("microbus") ||
-        rawCat.includes("minibus") ||
-        rawCat.includes("furgon") ||
-        rawCat.includes("coaster") ||
-        rawCat.includes("van-minivan")
-      ) {
-        vehicleCategory = "microbus";
-      } else if (rawCat.includes("pickup")) {
-        vehicleCategory = "pickup";
-      }
+      // La categoría es la que el alta congeló, no una de tres etiquetas: una
+      // reserva en `van` o `bus-coaster` no se muestra como «SUV». El nombre y la
+      // tarifa por km solo están a mano cuando la empresa tiene fila para esa
+      // categoría.
+      const categoryId = String(st.categoryId || "").trim();
+      const categoryRate = companyRates.find(
+        (rate) => rate.categoryId === categoryId
+      );
+      const categoryName = categoryRate?.categoryName;
+      const categoryFareRate = categoryRate?.fareRate;
+      const categoryRatePerKm =
+        typeof categoryFareRate === "number" &&
+        Number.isFinite(categoryFareRate) &&
+        categoryFareRate > 0
+          ? categoryFareRate
+          : undefined;
+      const isLargeCategory = /microbus|minibus|furgon|coaster|van/.test(
+        categoryId.toLowerCase()
+      );
 
       return {
         id: st.scheduledTripId,
@@ -518,10 +545,11 @@ export default function CorporatePortalPage() {
           trav?.name ||
           (st.travellerId ? "Viajero Corporativo" : ""),
         passengersCount:
-          (st as any).passengerCount || (vehicleCategory === "microbus" ? 8 : 1),
+          (st as any).passengerCount || (isLargeCategory ? 8 : 1),
         passengerNames: trav?.name ? [trav.name] : [],
         passengerPhone: trav?.phone || "",
-        vehicleCategory: vehicleCategory as any,
+        vehicleCategory: categoryId,
+        categoryName,
         hasCargo: Boolean((st as any).hasCargo),
         origin: {
           address: st.originAddress,
@@ -547,10 +575,10 @@ export default function CorporatePortalPage() {
         estimatedDistanceKm: Number((st as any).chargedDistance || 15),
         estimatedDurationMinutes: 25,
         tariffApplied: {
-          category: (st.categoryId as any) || "suv",
-          ratePerKm: 0.67,
-          minFare: 13.56,
-          baseDistanceKm: 20,
+          // El id real que congeló el alta, sin colapsar a `suv`, y la tarifa por km
+          // solo cuando `listCompanyRates` la conoce para esa categoría.
+          category: categoryId,
+          ratePerKm: categoryRatePerKm,
           calculatedAmount: st.totalAmount,
         },
         finalAmount: st.totalAmount,
@@ -569,6 +597,7 @@ export default function CorporatePortalPage() {
     vehiclesMap,
     costCenters,
     travellersList,
+    companyRates,
     company?.id,
     company?.tradeName,
     company?.legalName,
@@ -664,6 +693,19 @@ export default function CorporatePortalPage() {
       ) || selectedRequest
     );
   }, [requests, selectedRequest]);
+
+  // La tarifa por km de la reserva abierta, SOLO si se conoce para su categoría.
+  // La tarjeta imprimía la tarifa publicada del SUV para cualquier categoría.
+  const liveRatePerKm = liveSelectedRequest?.tariffApplied?.ratePerKm;
+  const liveRateKnown =
+    typeof liveRatePerKm === "number" &&
+    Number.isFinite(liveRatePerKm) &&
+    liveRatePerKm > 0;
+  const liveMinFare = liveSelectedRequest?.tariffApplied?.minFare;
+  const liveMinFareKnown =
+    typeof liveMinFare === "number" &&
+    Number.isFinite(liveMinFare) &&
+    liveMinFare > 0;
 
   // Telemetría GPS en tiempo real desde Firebase Realtime Database (RTDB)
   const [driverTelemetry, setDriverTelemetry] = useState<{
@@ -2159,7 +2201,7 @@ export default function CorporatePortalPage() {
                         </td>
                         <td className="py-3.5 px-3">
                           <span className="px-2 py-0.5 rounded bg-[#ECF2FF] text-[#5D87FF] font-bold uppercase text-[10px]">
-                            {(req.vehicleCategory || "suv").toUpperCase()} · {req.passengersCount} pax
+                            {(req.categoryName || req.vehicleCategory || "Sin categoría").toUpperCase()} · {req.passengersCount} pax
                           </span>
                           {req.hasCargo && (
                             <span className="block text-[10px] text-[#FFAE1F] font-semibold mt-0.5">
@@ -2554,9 +2596,19 @@ export default function CorporatePortalPage() {
                   </span>
                 </div>
                 <span className="text-[11px] text-[#0F766E] block mt-0.5">
-                  Distancia facturable: {liveSelectedRequest.estimatedDistanceKm} km · Tarifa/km: $
-                  {Number(liveSelectedRequest.tariffApplied?.ratePerKm || 0.67).toFixed(2)} · Mínimo: $
-                  {Number(liveSelectedRequest.tariffApplied?.minFare || 13.56).toFixed(2)}
+                  Categoría:{" "}
+                  {(liveSelectedRequest.categoryName ||
+                    liveSelectedRequest.vehicleCategory ||
+                    "Sin categoría"
+                  ).toUpperCase()}{" "}
+                  · Distancia facturable:{" "}
+                  {liveSelectedRequest.estimatedDistanceKm} km ·{" "}
+                  {liveRateKnown
+                    ? `Tarifa/km: $${Number(liveRatePerKm).toFixed(2)}`
+                    : "Tarifa por km pendiente de cotización"}
+                  {liveMinFareKnown
+                    ? ` · Mínimo: $${Number(liveMinFare).toFixed(2)}`
+                    : ""}
                 </span>
               </div>
 

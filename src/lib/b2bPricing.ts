@@ -8,7 +8,6 @@ export const SV_DEFAULT_NEGOTIATED_RATE = 0.67;
 export const SV_DEFAULT_COUNTRY_FLOOR_RATE = 0.45;
 export const SV_DEFAULT_TAX_RATE = 0.13;
 export const SV_DEFAULT_TAX_LABEL = "IVA";
-export const MAX_VEHICLE_PASSENGER_CAPACITY = 12;
 export const LILO_DIRECT_CONTACT = {
   phone: "+503 2200-5456",
   whatsapp: "+503 7000-5456",
@@ -23,9 +22,6 @@ export const B2B_RESERVATION_CONFIG = {
   minAdvanceHours: 3,    // Anticipación mínima general obligatoria (3 horas)
   corporateRecommendedHours: 6, // Anticipación recomendada para clientes corporativos (6 horas)
 };
-
-export const CAPACITY_EXCEEDED_MESSAGE_ES =
-  "Para viajes de más de 12 pasajeros, contáctenos por WhatsApp o llamada y con gusto le ayudaremos de inmediato.\nEstamos para servirle.";
 
 export interface B2BTariffRule {
   category: VehicleCategory;
@@ -218,8 +214,9 @@ export function calculateMultiStopRouteDistanceKm(
 }
 
 export interface B2BTariffBreakdown {
-  category: VehicleCategory;
-  rule: B2BTariffRule;
+  category: string;
+  /** La regla local de esta categoría, cuando la tabla tiene una. */
+  rule?: B2BTariffRule;
   oneWayDistanceKm: number;
   billableDistanceKm: number;
   chargedDistanceKm: number;
@@ -246,7 +243,11 @@ export interface B2BTariffBreakdown {
 }
 
 export interface B2BTariffOptions {
-  negotiatedFareRate?: number;
+  /**
+   * La tarifa por km ya resuelta para la categoría —la de la empresa con su
+   * respaldo de país—. Manda sobre la tabla local.
+   */
+  ratePerKm?: number;
   minimumDistanceKm?: number;
   taxRate?: number;
   taxLabel?: string;
@@ -254,31 +255,26 @@ export interface B2BTariffOptions {
 }
 
 export function calculateB2BTariff(
-  category: VehicleCategory,
+  category: string,
   oneWayDistanceKm: number,
   roundTrip: boolean = false,
   options?: B2BTariffOptions
 ): B2BTariffBreakdown {
-  const baseRule =
-    EL_SALVADOR_B2B_TARIFFS[category] || EL_SALVADOR_B2B_TARIFFS.suv;
-  let ratePerKm = baseRule.ratePerKm;
-  if (
-    typeof options?.negotiatedFareRate === "number" &&
-    Number.isFinite(options.negotiatedFareRate) &&
-    options.negotiatedFareRate > 0
-  ) {
-    if (category === "suv") {
-      ratePerKm = options.negotiatedFareRate;
-    } else if (category === "pickup") {
-      ratePerKm = Number(
-        (options.negotiatedFareRate * (0.75 / 0.67)).toFixed(2)
-      );
-    } else if (category === "microbus") {
-      ratePerKm = Number(
-        (options.negotiatedFareRate * (0.9 / 0.67)).toFixed(2)
-      );
-    }
-  }
+  // La tarifa por km es la RESUELTA para la categoría (`ratePerKm`) o cero. La tabla
+  // local ya no presta precios: sus 0.67 / 0.75 / 0.90 no son la tarifa de la empresa
+  // ni la del país, así que usarlos sería cotizar un número que nadie verificó. Sin
+  // tarifa, la pantalla dice «pendiente de cotización»; el número real llega del
+  // servidor. La tabla sigue aportando las etiquetas de `rule`.
+  const localRule = (
+    EL_SALVADOR_B2B_TARIFFS as Record<string, B2BTariffRule | undefined>
+  )[category];
+  const resolvedRate = options?.ratePerKm;
+  const ratePerKm =
+    typeof resolvedRate === "number" &&
+    Number.isFinite(resolvedRate) &&
+    resolvedRate > 0
+      ? resolvedRate
+      : 0;
   const minimumDistanceKm =
     typeof options?.minimumDistanceKm === "number" &&
     Number.isFinite(options.minimumDistanceKm) &&
@@ -329,12 +325,14 @@ export function calculateB2BTariff(
     2
   )}) = $${totalAmount.toFixed(2)} USD`;
 
-  const rule: B2BTariffRule = {
-    ...baseRule,
-    ratePerKm,
-    minFare,
-    baseDistanceKm: minimumDistanceKm,
-  };
+  const rule: B2BTariffRule | undefined = localRule
+    ? {
+        ...localRule,
+        ratePerKm,
+        minFare,
+        baseDistanceKm: minimumDistanceKm,
+      }
+    : undefined;
 
   return {
     category,
@@ -363,13 +361,4 @@ export function calculateB2BTariff(
     estimatedDurationMinutes,
     breakdownSummary,
   };
-}
-
-export function getAllowedCategoriesForPassengers(
-  passengersCount: number
-): VehicleCategory[] {
-  if (passengersCount > 4) {
-    return ["microbus"];
-  }
-  return ["suv", "pickup", "microbus"];
 }

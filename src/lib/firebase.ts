@@ -164,6 +164,8 @@ export interface CreateScheduledTripPayload {
   etaMinutes: number;
   paymentMethod: string;
   costCentreId?: string;
+  /** La categoría elegida entre las asignables. Ausente, el servidor la deriva. */
+  categoryId?: string;
 }
 
 export interface CreateScheduledTripResponse {
@@ -181,7 +183,9 @@ export interface CreateScheduledTripResponse {
   costCentreId: string;
 }
 
-// `categoryId`, `companyId` y `countryId` NO se mandan: el servidor los deriva.
+// `companyId` y `countryId` NO se mandan: el servidor los deriva del llamador.
+// `categoryId` es opcional: si se manda, el servidor lo valida contra las
+// categorías asignables y rechaza lo que no pertenezca; si no, la deriva.
 export const createScheduledTripCallable = (data: CreateScheduledTripPayload) =>
   httpsCallable<CreateScheduledTripPayload, CreateScheduledTripResponse>(
     functions,
@@ -288,6 +292,32 @@ export const listVehicleTypesCallable = (data: {
     typeof data,
     { types: VehicleTypeSummary[]; modelsWithoutCapacity: unknown[] }
   >(functions, "listVehicleTypes")(data);
+
+// --- listScheduledTripCategories: las categorías que ESTA reserva puede asignar ---
+export interface AssignableCategoryRow {
+  categoryId: string;
+  name: string;
+  /** La capacidad comercial de la categoría para esta cantidad de pasajeros. */
+  maxPassengers: number;
+  sortOrder: number;
+}
+
+export interface ListScheduledTripCategoriesResponse {
+  countryId: string;
+  passengerCount: number;
+  /** De la más ajustada a la más amplia. */
+  categories: AssignableCategoryRow[];
+  /** La que el alta asigna cuando no se manda `categoryId`. */
+  assignedCategoryId: string;
+}
+
+export const listScheduledTripCategoriesCallable = (data: {
+  passengerCount: number;
+}) =>
+  httpsCallable<typeof data, ListScheduledTripCategoriesResponse>(
+    functions,
+    "listScheduledTripCategories"
+  )(data);
 
 // --- CF-45: listCompanyRates ---
 export interface CompanyRateRow {

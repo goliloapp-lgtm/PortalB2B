@@ -17,9 +17,9 @@ import {
   listCostCentresCallable,
   listTravellersCallable,
   listCompanyRatesCallable,
-  listVehicleTypesCallable,
+  listScheduledTripCategoriesCallable,
+  AssignableCategoryRow,
   CompanyRateRow,
-  VehicleTypeSummary,
   getFareQuoteCallable,
   GetFareQuoteResponse,
   db,
@@ -31,23 +31,18 @@ import {
   FrozenFareBreakdown,
   RoutePoint,
   TripLegInput,
-  VehicleCategory,
 } from "@/types/b2b";
 import {
   EL_SALVADOR_LOCATIONS,
-  MAX_VEHICLE_PASSENGER_CAPACITY,
   LILO_DIRECT_CONTACT,
   SV_DEFAULT_MINIMUM_DISTANCE_KM,
-  SV_DEFAULT_NEGOTIATED_RATE,
   SV_DEFAULT_TAX_RATE,
   SV_DEFAULT_TAX_LABEL,
   LILO_COMMISSION_RATE,
   calculateB2BTariff,
   calculateRoadDistanceKm,
   calculateMultiStopRouteDistanceKm,
-  getAllowedCategoriesForPassengers,
   B2B_RESERVATION_CONFIG,
-  CAPACITY_EXCEEDED_MESSAGE_ES,
 } from "@/lib/b2bPricing";
 import GoogleAddressAutocomplete from "@/components/maps/GoogleAddressAutocomplete";
 import GoogleRouteMap from "@/components/maps/GoogleRouteMap";
@@ -59,7 +54,6 @@ import {
   Trash2,
   Calculator,
   CheckCircle2,
-  AlertTriangle,
   Globe,
   PhoneCall,
   Clock,
@@ -113,8 +107,29 @@ export default function NuevaSolicitudPortalB2BPage() {
   const [passengersCount, setPassengersCount] = useState<number>(2);
   const [passengerNamesInput, setPassengerNamesInput] = useState("");
   const [passengerPhone, setPassengerPhone] = useState("+503 ");
-  const [vehicleCategory, setVehicleCategory] =
-    useState<VehicleCategory>("suv");
+  // La categoría es el `categoryId` del catálogo, no la unión de tres valores: el
+  // backend publica cuáles son asignables y con qué nombre mostrarlas.
+  const [selectedCategoryId, setSelectedCategoryId] = useState("");
+  const [assignableCategories, setAssignableCategories] = useState<
+    AssignableCategoryRow[]
+  >([]);
+  const [assignedCategoryId, setAssignedCategoryId] = useState("");
+  // El error acompaña a la cantidad con la que se intentó cargar: el de una cantidad
+  // anterior no describe la reserva que se está armando.
+  const [categoryLoadError, setCategoryLoadError] = useState<{
+    passengerCount: number;
+    message: string;
+  } | null>(null);
+  // La cantidad para la que se cargó la lista vigente. Mientras difiera de
+  // `passengersCount`, la lista anterior no dice nada de esta reserva.
+  const [categoriesLoadedFor, setCategoriesLoadedFor] = useState<number | null>(
+    null
+  );
+  // El techo de pasajeros es la categoría más amplia que el backend ofrece hoy
+  // para el país, no el 12 que estaba escrito en esta pantalla.
+  const [maxCategoryCapacity, setMaxCategoryCapacity] = useState<number | null>(
+    null
+  );
 
   const [hasCargo, setHasCargo] = useState(false);
   const [cargoDescription, setCargoDescription] = useState("");
@@ -188,7 +203,6 @@ export default function NuevaSolicitudPortalB2BPage() {
     GetFareQuoteResponse["quote"] | null
   >(null);
   const [companyRates, setCompanyRates] = useState<CompanyRateRow[]>([]);
-  const [vehicleTypes, setVehicleTypes] = useState<VehicleTypeSummary[]>([]);
 
   useEffect(() => {
     if (!loading && !user) {
@@ -224,17 +238,9 @@ export default function NuevaSolicitudPortalB2BPage() {
     }
   }, [company?.id, company?.minimumBookingLeadMinutes, company?.allowsImmediateTrips]);
 
-  // Cargar catálogo de tipos de vehículo B2B (listVehicleTypes) y tarifas de empresa (CF-45)
+  // Cargar las tarifas de la empresa por categoría (CF-45)
   useEffect(() => {
     if (!user) return;
-    listVehicleTypesCallable({ b2bSuitable: true })
-      .then((res) => {
-        if (Array.isArray(res.data?.types)) {
-          setVehicleTypes(res.data.types);
-        }
-      })
-      .catch(() => {});
-
     if (isCompanyAdmin) {
       listCompanyRatesCallable()
         .then((res) => {
@@ -380,16 +386,100 @@ export default function NuevaSolicitudPortalB2BPage() {
     };
   }, [company?.id, company?.countryId, isCompanyAdmin]);
 
-  const allowedCategories = useMemo(
-    () => getAllowedCategoriesForPassengers(passengersCount),
-    [passengersCount]
-  );
-
+  // Las categorías asignables las decide el backend para esta cantidad exacta:
+  // filtra capacidad, tarifa de país y flota activa del país, cosas que la pantalla
+  // no puede conocer. El rebote evita una llamada por tecla y el error NO se traga:
+  // una lista vacía dejaría al operador adivinando por qué no puede reservar.
   useEffect(() => {
-    if (!allowedCategories.includes(vehicleCategory)) {
-      setVehicleCategory("microbus");
-    }
-  }, [allowedCategories, vehicleCategory]);
+    if (!user) return;
+    let active = true;
+    const timer = setTimeout(() => {
+      setCategoryLoadError(null);
+      listScheduledTripCategoriesCallable({ passengerCount: passengersCount })
+        .then((res) => {
+          if (!active) return;
+          const rows = Array.isArray(res.data?.categories)
+            ? res.data.categories
+            : [];
+          setAssignableCategories(rows);
+          setAssignedCategoryId(res.data?.assignedCategoryId || "");
+          setCategoriesLoadedFor(passengersCount);
+          setMaxCategoryCapacity(
+            rows.length > 0
+              ? Math.max(...rows.map((row) => row.maxPassengers))
+              : null
+          );
+          setCategoryLoadError(
+            rows.length > 0
+              ? null
+              : {
+                  passengerCount: passengersCount,
+                  message:
+                    "No hay categorías disponibles para esta cantidad de pasajeros.",
+                }
+          );
+        })
+        .catch((err) => {
+          if (!active) return;
+          setAssignableCategories([]);
+          setAssignedCategoryId("");
+          setCategoriesLoadedFor(null);
+          setCategoryLoadError({
+            passengerCount: passengersCount,
+            message: formatFriendlyError(
+              err,
+              "No pudimos cargar las categorías disponibles para esta cantidad de pasajeros. Por favor intenta nuevamente o contáctanos por WhatsApp o teléfono."
+            ),
+          });
+        });
+    }, 300);
+
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
+  }, [user, passengersCount]);
+
+  // La lista solo vale para la cantidad con la que se cargó: mientras la cantidad
+  // pedida y la cargada difieran —rebote en curso o carga fallida— la elección, el
+  // tope y las opciones de la lista anterior no describen esta reserva.
+  const categoriesReadyForCurrentCount =
+    categoriesLoadedFor === passengersCount;
+
+  // El mensaje de error también es de una cantidad concreta: al cambiar de cantidad
+  // queda viejo hasta que la nueva carga responda.
+  const categoryErrorMessage =
+    categoryLoadError !== null &&
+    categoryLoadError.passengerCount === passengersCount
+      ? categoryLoadError.message
+      : null;
+
+  // La elección efectiva: la del operador mientras siga siendo asignable. Si el
+  // backend ya no la ofrece para esta cantidad —o es la primera carga—, se
+  // preselecciona la que el alta elegiría hoy (`assignedCategoryId`), que es la más
+  // ajustada del conjunto. Derivarla evita imponerla por estado. Sin lista válida
+  // para esta cantidad no hay elección: el alta no puede llevarse una categoría que
+  // se cargó para otra cantidad.
+  const effectiveCategoryId = useMemo(() => {
+    if (!categoriesReadyForCurrentCount) return "";
+    const keepsChoice = assignableCategories.some(
+      (row) => row.categoryId === selectedCategoryId
+    );
+    if (keepsChoice) return selectedCategoryId;
+    return assignedCategoryId || assignableCategories[0]?.categoryId || "";
+  }, [
+    categoriesReadyForCurrentCount,
+    assignableCategories,
+    selectedCategoryId,
+    assignedCategoryId,
+  ]);
+
+  // El tope solo se compara contra una lista que corresponde a esta cantidad; el
+  // máximo de una lista vieja produciría un falso «capacidad excedida».
+  const capacityExceeded =
+    categoriesReadyForCurrentCount &&
+    maxCategoryCapacity !== null &&
+    passengersCount > maxCategoryCapacity;
 
   const oneWayDistanceKm = useMemo(() => {
     if (!originCoord.lat || !destinationCoord.lat) return 0;
@@ -404,30 +494,62 @@ export default function NuevaSolicitudPortalB2BPage() {
     return calculateMultiStopRouteDistanceKm(pts);
   }, [googleDistanceKm, roundTrip, originCoord, destinationCoord, stops]);
 
-  const negotiatedRate = useMemo(() => {
-    const suvRate = companyRates.find((r) => r.categoryId === "suv")?.fareRate;
-    if (typeof suvRate === "number" && suvRate > 0) return suvRate;
-    const raw = Number(company?.negotiatedFareRate);
-    return Number.isFinite(raw) && raw > 0 ? raw : SV_DEFAULT_NEGOTIATED_RATE;
-  }, [company?.negotiatedFareRate, companyRates]);
+  // La tarifa del estimado local sale de la categoría ELEGIDA: para el
+  // administrador, la de `listCompanyRates` —que ya trae la negociada o, en su
+  // defecto, la del país—; para el resto, la cotización del servidor, que es el
+  // mismo precio resuelto. Nunca se cae a la tarifa del SUV.
+  const selectedFareRate = useMemo(() => {
+    if (!effectiveCategoryId) return undefined;
+
+    if (isCompanyAdmin) {
+      const row = companyRates.find(
+        (r) => r.categoryId === effectiveCategoryId
+      );
+      const fareRate = row?.fareRate;
+      if (
+        typeof fareRate === "number" &&
+        Number.isFinite(fareRate) &&
+        fareRate > 0
+      ) {
+        return fareRate;
+      }
+    }
+
+    const quoted = serverQuote?.appliedFareRate;
+    return typeof quoted === "number" && Number.isFinite(quoted) && quoted > 0
+      ? quoted
+      : undefined;
+  }, [isCompanyAdmin, companyRates, effectiveCategoryId, serverQuote]);
+
+  const selectedCategoryName = useMemo(
+    () =>
+      assignableCategories.find(
+        (row) => row.categoryId === effectiveCategoryId
+      )?.name || "",
+    [assignableCategories, effectiveCategoryId]
+  );
 
   const tariff = useMemo(
     () =>
-      calculateB2BTariff(vehicleCategory, oneWayDistanceKm, roundTrip, {
-        negotiatedFareRate: negotiatedRate,
+      calculateB2BTariff(effectiveCategoryId, oneWayDistanceKm, roundTrip, {
+        ratePerKm: selectedFareRate,
         minimumDistanceKm: countryPricingConfig.minimumDistance,
         taxRate: countryPricingConfig.taxRate,
         taxLabel: countryPricingConfig.taxLabel,
         commissionRate: countryPricingConfig.commissionRate,
       }),
     [
-      vehicleCategory,
+      effectiveCategoryId,
       oneWayDistanceKm,
       roundTrip,
-      negotiatedRate,
+      selectedFareRate,
       countryPricingConfig,
     ]
   );
+
+  // Los dos números que los tramos necesitan salen del objeto `tariff`: una
+  // dependencia de propiedad no es verificable por el analizador de memoización.
+  const { chargedDistanceKm, estimatedDurationMinutes } = tariff;
 
   // Construir tramos (legs) reales a partir de los puntos de la ruta
   const routeLegs = useMemo<TripLegInput[]>(() => {
@@ -455,56 +577,38 @@ export default function NuevaSolicitudPortalB2BPage() {
       ? builtLegs
       : [
           {
-            distance: tariff.chargedDistanceKm,
-            durationMinutes: tariff.estimatedDurationMinutes,
+            distance: chargedDistanceKm,
+            durationMinutes: estimatedDurationMinutes,
           },
         ];
-  }, [originCoord, destinationCoord, stops, roundTrip, tariff.chargedDistanceKm, tariff.estimatedDurationMinutes]);
+  }, [originCoord, destinationCoord, stops, roundTrip, chargedDistanceKm, estimatedDurationMinutes]);
 
-  const backendCategoryId = useMemo(() => {
-    if (vehicleCategory === "pickup") {
-      const hasPickupSimple = vehicleTypes.some((t) => t.id === "pickup");
-      return hasPickupSimple ? "pickup" : "pickup-doble-cabina";
-    }
-    if (vehicleCategory === "microbus") {
-      const hasVan = vehicleTypes.some((t) => t.id === "van");
-      const hasMicrobus = vehicleTypes.some((t) => t.id === "microbus");
-      return hasMicrobus ? "microbus" : hasVan ? "van" : "microbus";
-    }
-    return "suv";
-  }, [vehicleCategory, vehicleTypes]);
-
-  // Consultar cotización oficial en el backend (getFareQuote — CF-38)
+  // Consultar la cotización oficial en el backend (getFareQuote — CF-38) SIEMPRE
+  // con la categoría elegida: sin `categoryId` el servidor cotiza la que él derive y
+  // el precio mostrado podía pertenecer a una categoría distinta de la que se
+  // congela al reservar. Si el backend la rechaza se muestra el estimado local, no un
+  // precio que no corresponde.
   useEffect(() => {
-    if (!user || routeLegs.length === 0) {
+    if (!user || routeLegs.length === 0 || !effectiveCategoryId) {
       setServerQuote(null);
       return;
     }
     let active = true;
-    getFareQuoteCallable({ legs: routeLegs, categoryId: backendCategoryId })
+    getFareQuoteCallable({ legs: routeLegs, categoryId: effectiveCategoryId })
       .then((res) => {
-        if (active && res.data?.quote) {
-          setServerQuote(res.data.quote);
+        if (active) {
+          setServerQuote(res.data?.quote ?? null);
         }
       })
-      .catch(() => {
-        // Fallback sin categoryId en caso de que la categoría específica no tenga fila en fareRates
-        getFareQuoteCallable({ legs: routeLegs })
-          .then((res) => {
-            if (active && res.data?.quote) {
-              setServerQuote(res.data.quote);
-            }
-          })
-          .catch(() => {
-            if (active) {
-              setServerQuote(null);
-            }
-          });
+      .catch((err) => {
+        if (!active) return;
+        setServerQuote(null);
+        console.warn("[NuevaSolicitud] Cotización con la categoría elegida:", err);
       });
     return () => {
       active = false;
     };
-  }, [user, routeLegs, backendCategoryId]);
+  }, [user, routeLegs, effectiveCategoryId]);
 
   const effectiveChargedDistance =
     serverQuote?.billableDistance ??
@@ -523,6 +627,10 @@ export default function NuevaSolicitudPortalB2BPage() {
       : serverQuote
         ? "Precio de país"
         : "Tarifa B2B";
+  // Solo hay importe si existe una tasa resuelta para la categoría (la del servidor
+  // o la de `listCompanyRates`). Sin ella no se imprime $0.00 ni la tarifa publicada
+  // de la tabla: el precio está pendiente de cotización.
+  const hasResolvedRate = effectiveRate > 0;
 
   const handleAddStop = () => {
     setStops((prev) => [
@@ -539,9 +647,12 @@ export default function NuevaSolicitudPortalB2BPage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (passengersCount > MAX_VEHICLE_PASSENGER_CAPACITY) {
+    if (!effectiveCategoryId) {
       const msg =
-        "Para viajes de más de 12 pasajeros, por favor contáctanos por WhatsApp o teléfono y con gusto te atenderemos de inmediato.";
+        categoryErrorMessage ||
+        (categoriesReadyForCurrentCount
+          ? "Por favor selecciona la categoría del vehículo antes de confirmar la reserva."
+          : "Por favor espera a que se carguen las categorías disponibles para esta cantidad de pasajeros.");
       setError(msg);
       toast.error(msg);
       return;
@@ -694,10 +805,12 @@ export default function NuevaSolicitudPortalB2BPage() {
       try {
         if (!isImmediate) {
           // CF-48: Reserva programada B2B via createScheduledTripCallable
-          // NO se envían categoryId, companyId ni countryId (el servidor los deriva)
+          // La categoría la elige el operador entre las asignables y el servidor la
+          // valida contra ese mismo conjunto; `companyId` y `countryId` los deriva.
           const scheduledRes = await createScheduledTripCallable({
             travellerId: resolvedTraveller.id,
             passengerCount: passengersCount,
+            categoryId: effectiveCategoryId,
             scheduledPickupAt: effectiveScheduledIso,
             originAddress: originPoint.address,
             originLatitude: originPoint.lat,
@@ -728,7 +841,7 @@ export default function NuevaSolicitudPortalB2BPage() {
             destinationLongitude: destPoint.lng,
             rideTimeMinutes: totalRideTimeMinutes,
             travellerId: resolvedTraveller.id,
-            categoryId: backendCategoryId,
+            categoryId: effectiveCategoryId,
             costCentreId: selectedCC?.id,
             legs,
           });
@@ -1117,7 +1230,7 @@ export default function NuevaSolicitudPortalB2BPage() {
                       )
                     }
                     className={`w-full text-xs border rounded-[6px] px-3 py-2.5 ${
-                      passengersCount > MAX_VEHICLE_PASSENGER_CAPACITY
+                      capacityExceeded
                         ? "border-[#FA896B] bg-[#FDEDE8]/30 font-bold"
                         : "border-[#DFE5EF]"
                     }`}
@@ -1131,50 +1244,58 @@ export default function NuevaSolicitudPortalB2BPage() {
                       : "Categoría Vehicular Requerida *"}
                   </label>
                   <select
-                    disabled={passengersCount > MAX_VEHICLE_PASSENGER_CAPACITY}
-                    value={vehicleCategory}
-                    onChange={(e) =>
-                      setVehicleCategory(e.target.value as VehicleCategory)
+                    disabled={
+                      !categoriesReadyForCurrentCount ||
+                      assignableCategories.length === 0
                     }
+                    value={effectiveCategoryId}
+                    onChange={(e) => setSelectedCategoryId(e.target.value)}
                     className="w-full text-xs border border-[#DFE5EF] rounded-[6px] px-3 py-2.5 bg-white disabled:opacity-60"
                   >
-                    <option
-                      value="suv"
-                      disabled={!allowedCategories.includes("suv")}
-                    >
-                      SUV Corporativa (Máx. 4 pax) — Tarifa negociada $
-                      {negotiatedRate.toFixed(2)}/km · Mín.{" "}
-                      {effectiveMinDistance} km
-                    </option>
-                    <option
-                      value="pickup"
-                      disabled={!allowedCategories.includes("pickup")}
-                    >
-                      Pick-up Doble Cabina (Máx. 4 pax) — Tarifa carga $0.75/km · Mín.{" "}
-                      {effectiveMinDistance} km
-                    </option>
-                    <option value="microbus">
-                      Microbús Corporativo (Máx. 12 pax) — Tarifa grupal $0.90/km · Mín.{" "}
-                      {effectiveMinDistance} km
-                    </option>
+                    {!categoriesReadyForCurrentCount ||
+                    assignableCategories.length === 0 ? (
+                      <option value="">
+                        {categoryErrorMessage
+                          ? isEn
+                            ? "No categories available"
+                            : "Sin categorías disponibles"
+                          : isEn
+                          ? "Loading categories..."
+                          : "Cargando categorías..."}
+                      </option>
+                    ) : (
+                      assignableCategories.map((category) => (
+                        <option
+                          key={category.categoryId}
+                          value={category.categoryId}
+                        >
+                          {category.name} (Máx. {category.maxPassengers} pax)
+                        </option>
+                      ))
+                    )}
                   </select>
+                  {categoryErrorMessage && (
+                    <p className="mt-2 text-[11px] font-semibold text-[#B91C1C] whitespace-pre-line">
+                      {categoryErrorMessage}
+                    </p>
+                  )}
                 </div>
               </div>
 
-              {passengersCount > MAX_VEHICLE_PASSENGER_CAPACITY && (
+              {capacityExceeded && maxCategoryCapacity !== null && (
                 <div className="p-4 bg-[#FDEDE8] border border-[#FA896B] text-[#B91C1C] rounded-[7px] text-xs space-y-2">
                   <div className="flex items-center space-x-2 font-bold text-sm">
                     <PhoneCall className="w-4 h-4 shrink-0" />
                     <span>
                       {isEn
-                        ? `Capacity Exceeded (${passengersCount} passengers > max ${MAX_VEHICLE_PASSENGER_CAPACITY})`
-                        : `Capacidad Máxima Excedida (${passengersCount} pasajeros > límite de ${MAX_VEHICLE_PASSENGER_CAPACITY})`}
+                        ? `Capacity Exceeded (${passengersCount} passengers > max ${maxCategoryCapacity})`
+                        : `Capacidad Máxima Excedida (${passengersCount} pasajeros > límite de ${maxCategoryCapacity})`}
                     </span>
                   </div>
                   <p className="leading-relaxed whitespace-pre-line text-[13px] font-semibold text-[#8B0000]">
                     {isEn
-                      ? `For trips with more than 12 passengers, please contact us by WhatsApp or phone and we will gladly assist you immediately.\nWe are at your service.`
-                      : `Para viajes de más de 12 pasajeros, contáctenos por WhatsApp o llamada y con gusto le ayudaremos de inmediato.\nEstamos para servirle.`}
+                      ? `For trips with more than ${maxCategoryCapacity} passengers, please contact us by WhatsApp or phone and we will gladly assist you immediately.\nWe are at your service.`
+                      : `Para viajes de más de ${maxCategoryCapacity} pasajeros, contáctenos por WhatsApp o llamada y con gusto le ayudaremos de inmediato.\nEstamos para servirle.`}
                   </p>
                   <div className="pt-1 flex flex-wrap items-center gap-2">
                     <a
@@ -1197,18 +1318,6 @@ export default function NuevaSolicitudPortalB2BPage() {
                   </div>
                 </div>
               )}
-
-              {passengersCount > 4 &&
-                passengersCount <= MAX_VEHICLE_PASSENGER_CAPACITY && (
-                  <div className="p-3 bg-[#FEF5E5] text-[#B45309] rounded-[6px] text-xs flex items-center space-x-2 font-medium">
-                    <AlertTriangle className="w-4 h-4 shrink-0" />
-                    <span>
-                      {isEn
-                        ? `For ${passengersCount} passengers (more than 4), Corporate Minibus (up to 12 passengers) is automatically assigned.`
-                        : `Para ${passengersCount} pasajeros (más de 4), el sistema asigna automáticamente Microbús Corporativo (hasta 12 pasajeros).`}
-                    </span>
-                  </div>
-                )}
 
               {travellers.length > 0 && (
                 <div>
@@ -1344,7 +1453,11 @@ export default function NuevaSolicitudPortalB2BPage() {
                 <div className="flex justify-between">
                   <span className="text-[#7C8FAC]">Categoría:</span>
                   <span className="font-bold text-[#2A3547] uppercase">
-                    {tariff.rule.shortLabel}
+                    {!categoriesReadyForCurrentCount
+                      ? isEn
+                        ? "Loading..."
+                        : "Cargando…"
+                      : selectedCategoryName || "Sin categoría asignable"}
                   </span>
                 </div>
                 <div className="flex justify-between">
@@ -1362,7 +1475,7 @@ export default function NuevaSolicitudPortalB2BPage() {
                     </span>
                   </span>
                 </div>
-                {isCompanyAdmin && (
+                {isCompanyAdmin && hasResolvedRate && (
                   <>
                     <div className="flex justify-between">
                       <span className="text-[#7C8FAC]">
@@ -1394,23 +1507,36 @@ export default function NuevaSolicitudPortalB2BPage() {
               </div>
 
               {isCompanyAdmin ? (
-                <div className="bg-[#ECF2FF] p-4 rounded-[8px] text-center">
-                  <span className="text-[10px] font-bold uppercase text-[#5D87FF] block">
-                    {isEn
-                      ? `Estimated Total (Base + ${effectiveTaxLabel})`
-                      : `Total Estimado (Base + ${effectiveTaxLabel} ${Math.round(
-                          effectiveTaxRate * 100
-                        )}%)`}
-                  </span>
-                  <span className="text-3xl font-extrabold text-[#5D87FF] block mt-1">
-                    ${effectiveTotalAmount.toFixed(2)} USD
-                  </span>
-                  <span className="text-[11px] text-[#5A6A85] block mt-1">
-                    {effectiveChargedDistance} km × ${effectiveRate.toFixed(2)}
-                    /km = ${effectiveBaseAmount.toFixed(2)} +{" "}
-                    {effectiveTaxLabel} ${effectiveTaxAmount.toFixed(2)}
-                  </span>
-                </div>
+                hasResolvedRate ? (
+                  <div className="bg-[#ECF2FF] p-4 rounded-[8px] text-center">
+                    <span className="text-[10px] font-bold uppercase text-[#5D87FF] block">
+                      {isEn
+                        ? `Estimated Total (Base + ${effectiveTaxLabel})`
+                        : `Total Estimado (Base + ${effectiveTaxLabel} ${Math.round(
+                            effectiveTaxRate * 100
+                          )}%)`}
+                    </span>
+                    <span className="text-3xl font-extrabold text-[#5D87FF] block mt-1">
+                      ${effectiveTotalAmount.toFixed(2)} USD
+                    </span>
+                    <span className="text-[11px] text-[#5A6A85] block mt-1">
+                      {effectiveChargedDistance} km × ${effectiveRate.toFixed(2)}
+                      /km = ${effectiveBaseAmount.toFixed(2)} +{" "}
+                      {effectiveTaxLabel} ${effectiveTaxAmount.toFixed(2)}
+                    </span>
+                  </div>
+                ) : (
+                  <div className="bg-[#FEF5E5] p-4 rounded-[8px] text-center">
+                    <span className="text-[10px] font-bold uppercase text-[#B45309] block">
+                      {isEn ? "Pending quote" : "Pendiente de cotización"}
+                    </span>
+                    <span className="text-[11px] text-[#92400E] block mt-1 leading-relaxed">
+                      {isEn
+                        ? "The price is quoted by the server with the rate of the chosen category. We do not show an amount until we have it."
+                        : "El precio lo calcula el servidor con la tarifa de la categoría elegida. No mostramos un monto hasta tenerlo."}
+                    </span>
+                  </div>
+                )
               ) : (
                 <div className="bg-[#ECF2FF] p-3.5 rounded-[8px] text-center text-xs text-[#5A6A85]">
                   Los montos financieros y techos de consumo son visibles únicamente para el Administrador de Empresa (LO-4.2).
@@ -1419,12 +1545,17 @@ export default function NuevaSolicitudPortalB2BPage() {
 
               <button
                 type="submit"
-                disabled={submitting || passengersCount > MAX_VEHICLE_PASSENGER_CAPACITY}
+                disabled={
+                  submitting ||
+                  !categoriesReadyForCurrentCount ||
+                  capacityExceeded ||
+                  !effectiveCategoryId
+                }
                 className="w-full py-3 bg-[#5D87FF] hover:bg-[#4570EA] disabled:bg-slate-300 disabled:cursor-not-allowed text-white font-bold rounded-[7px] text-xs transition flex items-center justify-center space-x-2 cursor-pointer"
               >
                 <CheckCircle2 className="w-4 h-4" />
                 <span>
-                  {passengersCount > MAX_VEHICLE_PASSENGER_CAPACITY
+                  {capacityExceeded
                     ? isEn
                       ? "Capacity Exceeded — Contact Lilo"
                       : "Capacidad Excedida — Comunícate con Lilo"
