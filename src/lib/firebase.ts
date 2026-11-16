@@ -297,8 +297,12 @@ export const listVehicleTypesCallable = (data: {
 export interface AssignableCategoryRow {
   categoryId: string;
   name: string;
-  /** La capacidad comercial de la categoría para esta cantidad de pasajeros. */
-  maxPassengers: number;
+  /**
+   * El techo de la categoría según los vehículos ACTIVOS de la flota del país (con
+   * el catálogo como respaldo). NO depende de la cantidad de pasajeros pedida: es la
+   * capacidad del vehículo, no un eco del formulario. `null` = techo desconocido.
+   */
+  maximumPassengers: number | null;
   sortOrder: number;
 }
 

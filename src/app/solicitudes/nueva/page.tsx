@@ -94,6 +94,22 @@ const resolveCostCentreSelection = (
   return list.length === 1 ? list[0].id : "";
 };
 
+// El techo de pasajeros sale de la FLOTA: `maximumPassengers` de cada fila es el de la
+// categoría, independiente de la cantidad pedida. Se toma el mayor de los declarados;
+// si ninguna fila declara techo, el limite es DESCONOCIDO (`null`) y no se inventa: el
+// rechazo del backend —que nombra el maximo real— es la autoridad.
+const resolveCategoryCapacityCeiling = (
+  rows: AssignableCategoryRow[]
+): number | null => {
+  const ceilings = rows
+    .map((row) => row.maximumPassengers)
+    .filter(
+      (value): value is number =>
+        typeof value === "number" && Number.isFinite(value)
+    );
+  return ceilings.length > 0 ? Math.max(...ceilings) : null;
+};
+
 export default function NuevaSolicitudPortalB2BPage() {
   const router = useRouter();
   const { user, company, companyRole, mustChangePassword, loading } = useAuth();
@@ -125,8 +141,8 @@ export default function NuevaSolicitudPortalB2BPage() {
   const [categoriesLoadedFor, setCategoriesLoadedFor] = useState<number | null>(
     null
   );
-  // El techo de pasajeros es la categoría más amplia que el backend ofrece hoy
-  // para el país, no el 12 que estaba escrito en esta pantalla.
+  // El techo de pasajeros es el de la categoría más amplia según la FLOTA del país,
+  // no el 12 que estaba escrito en esta pantalla ni la cantidad pedida.
   const [maxCategoryCapacity, setMaxCategoryCapacity] = useState<number | null>(
     null
   );
@@ -404,11 +420,7 @@ export default function NuevaSolicitudPortalB2BPage() {
           setAssignableCategories(rows);
           setAssignedCategoryId(res.data?.assignedCategoryId || "");
           setCategoriesLoadedFor(passengersCount);
-          setMaxCategoryCapacity(
-            rows.length > 0
-              ? Math.max(...rows.map((row) => row.maxPassengers))
-              : null
-          );
+          setMaxCategoryCapacity(resolveCategoryCapacityCeiling(rows));
           setCategoryLoadError(
             rows.length > 0
               ? null
@@ -1269,7 +1281,10 @@ export default function NuevaSolicitudPortalB2BPage() {
                           key={category.categoryId}
                           value={category.categoryId}
                         >
-                          {category.name} (Máx. {category.maxPassengers} pax)
+                          {category.name}
+                          {typeof category.maximumPassengers === "number"
+                            ? ` (hasta ${category.maximumPassengers} pax)`
+                            : ""}
                         </option>
                       ))
                     )}
