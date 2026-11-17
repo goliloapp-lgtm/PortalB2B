@@ -53,6 +53,7 @@ import { useLanguage } from "@/context/LanguageContext";
 import { B2BServiceRequest, CostCenter } from "@/types/b2b";
 import GoogleTripTrackingMap from "@/components/maps/GoogleTripTrackingMap";
 import { formatFriendlyError } from "@/lib/friendlyError";
+import { describeCompanyUserProvisionFailure } from "@/lib/companyUserProvisionError";
 import {
   mapRawTripStatus,
   getLifecycleStepIndex,
@@ -1195,12 +1196,15 @@ export default function CorporatePortalPage() {
       setShowInviteUserModal(false);
       await reloadCompanyUsers();
     } catch (err) {
-      console.error("[handleInviteUser] Error:", err);
+      // CF-103: un solo mensaje culpaba al correo de fallos que fueron del enlace o
+      // de la cuenta. Ahora va el texto fijo del código y, cuando el fallo fue de un
+      // paso, el código `INV-n` para citarlo a soporte. El mensaje del servidor no se
+      // muestra: lleva el correo completo de la persona y redacción interna.
+      const failure = describeCompanyUserProvisionFailure(err);
+      console.error("[handleInviteUser] Error:", failure?.stepCode ?? err);
       toast.error(
-        formatFriendlyError(
-          err,
-          "No pudimos enviar la invitación al colaborador. Verifica su correo e intenta de nuevo."
-        )
+        failure?.message ??
+          "No pudimos completar el alta del colaborador. Reintenta en unos minutos."
       );
     } finally {
       setInvitingUser(false);
