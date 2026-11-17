@@ -24,6 +24,8 @@ import {
   TravellerRow,
   listCompanyRatesCallable,
   CompanyRateRow,
+  listVehicleTypesCallable,
+  VehicleTypeSummary,
   listTripEventsCallable,
   TripEventRow,
   reportTripIncidentCallable,
@@ -281,6 +283,7 @@ export default function CorporatePortalPage() {
   const [periodSummary, setPeriodSummary] =
     useState<GetCompanyPeriodSummaryResponse | null>(null);
   const [companyRates, setCompanyRates] = useState<CompanyRateRow[]>([]);
+  const [vehicleTypes, setVehicleTypes] = useState<VehicleTypeSummary[]>([]);
   const [travellersList, setTravellersList] = useState<TravellerRow[]>([]);
   const [newTravName, setNewTravName] = useState("");
   const [newTravPhone, setNewTravPhone] = useState("+503 ");
@@ -355,6 +358,13 @@ export default function CorporatePortalPage() {
   const reloadAdminData = async () => {
     if (!user || !company?.id) return;
     void fetchCompanyTripsAndScheduled();
+    listVehicleTypesCallable({ b2bSuitable: true })
+      .then((res) => {
+        if (Array.isArray(res.data?.types)) {
+          setVehicleTypes(res.data.types);
+        }
+      })
+      .catch(() => {});
     if (!isCompanyAdmin) return;
     try {
       const [summaryRes, ratesRes, ccRes, travRes, schedRes, ccReqRes] = await Promise.allSettled([
@@ -582,7 +592,8 @@ export default function CorporatePortalPage() {
       const categoryRate = companyRates.find(
         (rate) => rate.categoryId === categoryId
       );
-      const categoryName = categoryRate?.categoryName;
+      const vehicleType = vehicleTypes.find((vt) => vt.id === categoryId);
+      const categoryName = categoryRate?.categoryName || vehicleType?.name;
       const categoryFareRate = categoryRate?.fareRate;
       const categoryRatePerKm =
         typeof categoryFareRate === "number" &&
@@ -593,6 +604,11 @@ export default function CorporatePortalPage() {
       const isLargeCategory = /microbus|minibus|furgon|coaster|van/.test(
         categoryId.toLowerCase()
       );
+      const rawChargedDistance = Number((st as any).chargedDistance);
+      const chargedDistanceKm =
+        Number.isFinite(rawChargedDistance) && rawChargedDistance > 0
+          ? rawChargedDistance
+          : Number.NaN;
 
       return {
         id: st.scheduledTripId,
@@ -633,16 +649,18 @@ export default function CorporatePortalPage() {
           lng: -89.23,
         },
         roundTrip: false,
-        legs: [
-          {
-            distance: Number((st as any).chargedDistance || 15),
-            durationMinutes: 25,
-          },
-        ],
+        legs: Number.isFinite(chargedDistanceKm)
+          ? [
+              {
+                distance: chargedDistanceKm,
+                durationMinutes: 25,
+              },
+            ]
+          : [],
         scheduledAt: st.scheduledPickupAt,
         createdAt: (st as any).createdAt || undefined,
         isImmediate: false,
-        estimatedDistanceKm: Number((st as any).chargedDistance || 15),
+        estimatedDistanceKm: chargedDistanceKm,
         estimatedDurationMinutes: 25,
         tariffApplied: {
           // El id real que congeló el alta, sin colapsar a `suv`, y la tarifa por km
@@ -668,6 +686,7 @@ export default function CorporatePortalPage() {
     costCenters,
     travellersList,
     companyRates,
+    vehicleTypes,
     company?.id,
     company?.tradeName,
     company?.legalName,
@@ -2115,36 +2134,41 @@ export default function CorporatePortalPage() {
                             </td>
                             <td className="py-3 px-3 text-right">
                               <div className="flex items-center justify-end space-x-1.5">
-                                {!isSelf && (
+                                {!isSelf && isCompanyAdmin && (
                                   <>
-                                    <button
-                                      type="button"
-                                      disabled={isUpdating}
-                                      onClick={() =>
-                                        handleChangeUserRole(
-                                          u,
-                                          u.companyRole === "company_admin"
-                                            ? "operador"
-                                            : "company_admin"
-                                        )
-                                      }
-                                      className="px-2 py-1 text-[11px] font-semibold border border-[#DFE5EF] hover:bg-[#F2F6FA] text-[#2A3547] rounded cursor-pointer transition disabled:opacity-50"
-                                      title="Cambiar rol entre Operador y Administrador"
-                                    >
-                                      Cambiar a {u.companyRole === "company_admin" ? "Operador" : "Admin"}
-                                    </button>
-                                    <button
-                                      type="button"
-                                      disabled={isUpdating}
-                                      onClick={() => handleToggleUserActive(u)}
-                                      className={`px-2 py-1 text-[11px] font-bold rounded cursor-pointer transition disabled:opacity-50 ${
-                                        u.isActive
-                                          ? "bg-[#FDEDE8] text-[#FA896B] hover:bg-[#FCDAD2]"
-                                          : "bg-[#E6FFFA] text-[#0D9488] hover:bg-[#CCFBEF]"
-                                      }`}
-                                    >
-                                      {u.isActive ? "Desactivar" : "Reactivar"}
-                                    </button>
+                                    {(u.companyRole === "company_admin" ||
+                                      u.companyRole === "operador") && (
+                                      <button
+                                        type="button"
+                                        disabled={isUpdating}
+                                        onClick={() =>
+                                          handleChangeUserRole(
+                                            u,
+                                            u.companyRole === "company_admin"
+                                              ? "operador"
+                                              : "company_admin"
+                                          )
+                                        }
+                                        className="px-2 py-1 text-[11px] font-semibold border border-[#DFE5EF] hover:bg-[#F2F6FA] text-[#2A3547] rounded cursor-pointer transition disabled:opacity-50"
+                                        title="Cambiar rol entre Operador y Administrador"
+                                      >
+                                        Cambiar a {u.companyRole === "company_admin" ? "Operador" : "Admin"}
+                                      </button>
+                                    )}
+                                    {typeof u.isActive === "boolean" && (
+                                      <button
+                                        type="button"
+                                        disabled={isUpdating}
+                                        onClick={() => handleToggleUserActive(u)}
+                                        className={`px-2 py-1 text-[11px] font-bold rounded cursor-pointer transition disabled:opacity-50 ${
+                                          u.isActive
+                                            ? "bg-[#FDEDE8] text-[#FA896B] hover:bg-[#FCDAD2]"
+                                            : "bg-[#E6FFFA] text-[#0D9488] hover:bg-[#CCFBEF]"
+                                        }`}
+                                      >
+                                        {u.isActive ? "Desactivar" : "Reactivar"}
+                                      </button>
+                                    )}
                                   </>
                                 )}
                                 {/* S8: la baja es del administrador de la empresa. El
@@ -2355,7 +2379,9 @@ export default function CorporatePortalPage() {
                               ).toFixed(2)}
                             </span>
                             <span className="text-[10px] text-[#7C8FAC]">
-                              {req.estimatedDistanceKm} km
+                              {Number.isFinite(req.estimatedDistanceKm)
+                                ? `${req.estimatedDistanceKm} km`
+                                : "s/d"}
                             </span>
                           </td>
                         )}
@@ -2712,7 +2738,10 @@ export default function CorporatePortalPage() {
                     "Sin categoría"
                   ).toUpperCase()}{" "}
                   · Distancia facturable:{" "}
-                  {liveSelectedRequest.estimatedDistanceKm} km ·{" "}
+                  {Number.isFinite(liveSelectedRequest.estimatedDistanceKm)
+                    ? `${liveSelectedRequest.estimatedDistanceKm} km`
+                    : "s/d"}{" "}
+                  ·{" "}
                   {liveRateKnown
                     ? `Tarifa/km: $${Number(liveRatePerKm).toFixed(2)}`
                     : "Tarifa por km pendiente de cotización"}
