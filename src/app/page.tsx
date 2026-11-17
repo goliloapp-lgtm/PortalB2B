@@ -1,15 +1,12 @@
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import Image from "next/image";
 import {
   collection,
-  doc,
-  getDocs,
   onSnapshot,
   query,
-  serverTimestamp,
   where,
 } from "firebase/firestore";
 import { ref as rtdbRef, onValue as onRtdbValue } from "firebase/database";
@@ -41,6 +38,9 @@ import {
   CostCentreRequestRow,
   createCompanyUserCallable,
   updateCompanyUserCallable,
+  listCompanyUsersCallable,
+  deleteCompanyUserCallable,
+  CompanyUserView,
   resolveCompanyRoleId,
   CompanyUserRow,
   db,
@@ -170,6 +170,75 @@ const STATUS_LABELS: Record<
     text: "text-[#FA896B]",
   },
 };
+
+/**
+ * El máximo de filas del listado de colaboradores (`CF-101`): el contrato acepta
+ * de 1 a 100, y ausente vale 100.
+ *
+ * Es el techo de la lista, no un recorte silencioso: si la empresa creciera más
+ * allá, la pantalla lo tendría que decir, no esconder colaboradores.
+ */
+const COMPANY_USERS_LIMIT = 100;
+
+/**
+ * Adapta una fila del callable (`CF-101`) a la fila que pinta la tabla.
+ *
+ * La lista blanca del backend no publica un dato que el documento no declara, así
+ * que un campo ausente se queda ausente y la celda dice «s/d». Este mapeo no
+ * rellena ni el rol, ni el estado, ni el nombre: el `getDocs` anterior recibía el
+ * documento entero y completaba lo que faltaba con un valor propio.
+ *
+ * Un `companyRole` que no es ninguno de los dos roles conocidos tampoco se
+ * presenta como si lo fuera: se queda sin declarar.
+ */
+function companyUserRowFromView(view: CompanyUserView): CompanyUserRow {
+  const knownRole =
+    view.companyRole === "company_admin" || view.companyRole === "operador"
+      ? view.companyRole
+      : undefined;
+
+  return {
+    uid: view.uid,
+    email: view.email,
+    firstName: view.firstName,
+    lastName: view.lastName,
+    companyRole: knownRole,
+    isActive: typeof view.isActive === "boolean" ? view.isActive : undefined,
+    createdAt: view.createdAt,
+  };
+}
+
+/**
+ * Lee un campo de texto de un error sin asumir su forma.
+ */
+function readErrorField(err: unknown, field: "code" | "message"): string {
+  if (typeof err !== "object" || err === null) return "";
+  const value = (err as Record<string, unknown>)[field];
+  return typeof value === "string" ? value.trim() : "";
+}
+
+/**
+ * El mensaje que ve el administrador cuando la baja de un colaborador falla.
+ *
+ * `deleteCompanyUser` rechaza con `failed-precondition` en un solo caso (CF-101):
+ * la empresa quedaría sin ningún administrador activo, y ese mensaje nombra la
+ * empresa y el motivo. `formatFriendlyError` no puede publicarlo —su último filtro
+ * ve el código `failed-precondition` y lo clasifica como técnico—, así que para
+ * esa negativa se muestra el texto del servidor tal cual en vez de un genérico que
+ * la oculte.
+ *
+ * No se usa para `updateCompanyUser`: esa puerta también responde
+ * `failed-precondition` a la auto-desactivación, con un texto en inglés que no es
+ * para el usuario.
+ */
+function formatDeleteCompanyUserError(err: unknown, fallback: string): string {
+  if (readErrorField(err, "code").includes("failed-precondition")) {
+    const serverMessage = readErrorField(err, "message");
+    if (serverMessage !== "") return serverMessage;
+  }
+
+  return formatFriendlyError(err, fallback);
+}
 
 export default function CorporatePortalPage() {
   const router = useRouter();
@@ -373,60 +442,61 @@ export default function CorporatePortalPage() {
     return () => unsubCC();
   }, [company?.id, company?.countryId]);
 
-  useEffect(() => {
-    if (!company?.id) return;
-    const cacheKey = `lilo_company_users_${company.id}`;
-    let initialList: CompanyUserRow[] = [];
+  // CF-101 (S5): la lista de colaboradores se lee por `listCompanyUsers`, no con
+  // `getDocs` sobre `users`. Aquella consulta dependía de las reglas de Firestore y
+  // recibía el documento ENTERO de cada colaborador —su saldo, sus tarifas, su
+  // teléfono— para pintar siete campos.
+  const [loadingCompanyUsers, setLoadingCompanyUsers] = useState(true);
+
+  /**
+   * Trae las filas del listado. No toca el estado: lo fija quien la llama, para
+   * que el efecto pueda esperar la respuesta en vez de re-renderizar de entrada.
+   */
+  const fetchCompanyUserRows = useCallback(async (): Promise<
+    CompanyUserRow[]
+  > => {
+    const res = await listCompanyUsersCallable({
+      limit: COMPANY_USERS_LIMIT,
+    });
+    const rows = Array.isArray(res.data?.users) ? res.data.users : [];
+    return rows.map(companyUserRowFromView);
+  }, []);
+
+  /** Recarga la lista después de una acción sobre el equipo. */
+  const reloadCompanyUsers = async () => {
+    if (!isCompanyAdmin) return;
     try {
-      const cached = localStorage.getItem(cacheKey);
-      if (cached) initialList = JSON.parse(cached);
-    } catch {}
-
-    if (user?.email) {
-      const currentIdx = initialList.findIndex(
-        (u) => u.email.toLowerCase() === user.email?.toLowerCase()
+      setCompanyUsers(await fetchCompanyUserRows());
+    } catch (err) {
+      // El listado es de administración: a un `operador` la puerta le contesta
+      // `permission-denied`, y eso no es un error que esta vista deba mostrar.
+      console.warn(
+        "[companyUsers] El listado de colaboradores no está disponible:",
+        err
       );
-      const currentUserRow: CompanyUserRow = {
-        uid: user.uid,
-        email: user.email,
-        firstName: company.contactName || "Administrador",
-        companyRole: companyRole === "operator" ? "operador" : "company_admin",
-        isActive: true,
-      };
-      if (currentIdx === -1) {
-        initialList = [currentUserRow, ...initialList];
-      } else {
-        initialList[currentIdx] = { ...initialList[currentIdx], ...currentUserRow };
-      }
     }
-    setCompanyUsers(initialList);
+  };
 
-    getDocs(query(collection(db, "users"), where("companyId", "==", company.id)))
-      .then((snap) => {
-        if (!snap.empty) {
-          const fetched: CompanyUserRow[] = snap.docs.map((d) => {
-            const data = d.data();
-            return {
-              uid: d.id,
-              email: data.email || "",
-              firstName: data.firstName,
-              lastName: data.lastName,
-              companyRole:
-                data.companyRole === "company_admin" ? "company_admin" : "operador",
-              isActive: data.isActive !== false,
-              createdAt: data.createdAt,
-            };
-          });
-          setCompanyUsers(fetched);
-          try {
-            localStorage.setItem(cacheKey, JSON.stringify(fetched));
-          } catch {}
-        }
+  useEffect(() => {
+    if (!isCompanyAdmin) return;
+    let cancelled = false;
+    fetchCompanyUserRows()
+      .then((rows) => {
+        if (!cancelled) setCompanyUsers(rows);
       })
       .catch((err) => {
-        console.warn("[companyUsers] Consulta users no accesible:", err);
+        console.warn(
+          "[companyUsers] El listado de colaboradores no está disponible:",
+          err
+        );
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingCompanyUsers(false);
       });
-  }, [company?.id, company?.contactName, user?.email, user?.uid, companyRole]);
+    return () => {
+      cancelled = true;
+    };
+  }, [isCompanyAdmin, fetchCompanyUserRows]);
 
   useEffect(() => {
     if (!user || !company?.id) {
@@ -1071,50 +1141,29 @@ export default function CorporatePortalPage() {
   };
 
   // CF-39 & CF-44: Handlers de Colaboradores Corporativos
+  //
+  // S1/S5: invitar, cambiar el rol, desactivar y retirar son potestad del
+  // administrador de la empresa. La tarjeta del equipo ya sólo se pinta para
+  // `company_admin`, pero cada acción vuelve a exigirlo: un `operador` no invita
+  // ni aunque la acción se invoque por fuera del botón.
   const handleInviteUser = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!isCompanyAdmin) return;
     if (!inviteEmail.trim() || !inviteEmail.includes("@")) {
       toast.error("Por favor ingresa un correo electrónico válido.");
-      return;
-    }
-    if (!company?.id) {
-      toast.error("No pudimos identificar tu empresa. Recarga la página e intenta de nuevo.");
       return;
     }
     setInvitingUser(true);
     try {
       const roleId = await resolveCompanyRoleId(inviteRole);
       const normalizedEmail = inviteEmail.trim().toLowerCase();
-      const res = await createCompanyUserCallable({
+      // El `companyId` NO viaja: la empresa del colaborador sale del claim del
+      // administrador que invita, y el del payload se ignora (S4).
+      await createCompanyUserCallable({
         email: normalizedEmail,
         roleId,
         firstName: inviteFirstName.trim() || undefined,
         lastName: inviteLastName.trim() || undefined,
-        companyId: company.id,
-      });
-
-      const newUser: CompanyUserRow = {
-        uid: res.data?.uid || `user-${Date.now()}`,
-        email: normalizedEmail,
-        firstName: inviteFirstName.trim() || undefined,
-        lastName: inviteLastName.trim() || undefined,
-        companyRole: inviteRole,
-        isActive: true,
-        createdAt: new Date().toISOString(),
-      };
-
-      setCompanyUsers((prev) => {
-        const updated = [
-          newUser,
-          ...prev.filter((u) => u.email.toLowerCase() !== normalizedEmail),
-        ];
-        try {
-          localStorage.setItem(
-            `lilo_company_users_${company.id}`,
-            JSON.stringify(updated)
-          );
-        } catch {}
-        return updated;
       });
 
       toast.success(
@@ -1125,7 +1174,8 @@ export default function CorporatePortalPage() {
       setInviteLastName("");
       setInviteRole("operador");
       setShowInviteUserModal(false);
-    } catch (err: any) {
+      await reloadCompanyUsers();
+    } catch (err) {
       console.error("[handleInviteUser] Error:", err);
       toast.error(
         formatFriendlyError(
@@ -1139,7 +1189,7 @@ export default function CorporatePortalPage() {
   };
 
   const handleToggleUserActive = async (targetUser: CompanyUserRow) => {
-    if (!company?.id) return;
+    if (!isCompanyAdmin) return;
     setUpdatingUserId(targetUser.uid);
     try {
       const newStatus = !targetUser.isActive;
@@ -1147,24 +1197,13 @@ export default function CorporatePortalPage() {
         userId: targetUser.uid,
         isActive: newStatus,
       });
-      setCompanyUsers((prev) => {
-        const updated = prev.map((u) =>
-          u.uid === targetUser.uid ? { ...u, isActive: newStatus } : u
-        );
-        try {
-          localStorage.setItem(
-            `lilo_company_users_${company.id}`,
-            JSON.stringify(updated)
-          );
-        } catch {}
-        return updated;
-      });
       toast.success(
         newStatus
           ? "La cuenta del colaborador fue reactivada."
           : "La cuenta del colaborador fue desactivada."
       );
-    } catch (err: any) {
+      await reloadCompanyUsers();
+    } catch (err) {
       toast.error(
         formatFriendlyError(err, "No pudimos cambiar el estado del colaborador.")
       );
@@ -1177,7 +1216,7 @@ export default function CorporatePortalPage() {
     targetUser: CompanyUserRow,
     newRole: "company_admin" | "operador"
   ) => {
-    if (!company?.id || targetUser.companyRole === newRole) return;
+    if (!isCompanyAdmin || targetUser.companyRole === newRole) return;
     setUpdatingUserId(targetUser.uid);
     try {
       const roleId = await resolveCompanyRoleId(newRole);
@@ -1185,26 +1224,56 @@ export default function CorporatePortalPage() {
         userId: targetUser.uid,
         roleId,
       });
-      setCompanyUsers((prev) => {
-        const updated = prev.map((u) =>
-          u.uid === targetUser.uid ? { ...u, companyRole: newRole } : u
-        );
-        try {
-          localStorage.setItem(
-            `lilo_company_users_${company.id}`,
-            JSON.stringify(updated)
-          );
-        } catch {}
-        return updated;
-      });
       toast.success(
         `El permiso del colaborador cambió a ${
           newRole === "company_admin" ? "Administrador de Empresa" : "Operador"
         }.`
       );
-    } catch (err: any) {
+      await reloadCompanyUsers();
+    } catch (err) {
       toast.error(
-        formatFriendlyError(err, "No pudimos actualizar el permiso del colaborador.")
+        formatFriendlyError(
+          err,
+          "No pudimos actualizar el permiso del colaborador."
+        )
+      );
+    } finally {
+      setUpdatingUserId(null);
+    }
+  };
+
+  /**
+   * Retira a un colaborador de la empresa (`deleteCompanyUser`, S8).
+   *
+   * La baja es reversible: el backend deshabilita la cuenta de Auth y borra
+   * `users/{uid}`, sin borrar la cuenta. El último administrador activo no se
+   * puede retirar, y ese rechazo se muestra con el texto del servidor, que nombra
+   * la empresa y el motivo.
+   */
+  const handleDeleteUser = async (targetUser: CompanyUserRow) => {
+    if (!isCompanyAdmin) return;
+
+    const confirmed = window.confirm(
+      `¿Eliminar a ${targetUser.email} del equipo de la empresa?\n\n` +
+        "Su cuenta quedará deshabilitada y perderá el acceso al portal. " +
+        "Los viajes y registros anteriores se conservan."
+    );
+    if (!confirmed) return;
+
+    setUpdatingUserId(targetUser.uid);
+    try {
+      const res = await deleteCompanyUserCallable({ userId: targetUser.uid });
+      const removedEmail = res.data?.email || targetUser.email;
+      toast.success(
+        `El colaborador ${removedEmail} fue eliminado del equipo de la empresa.`
+      );
+      await reloadCompanyUsers();
+    } catch (err) {
+      toast.error(
+        formatDeleteCompanyUserError(
+          err,
+          "No pudimos eliminar al colaborador. Intenta de nuevo."
+        )
       );
     } finally {
       setUpdatingUserId(null);
@@ -1963,7 +2032,13 @@ export default function CorporatePortalPage() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[#E5EAEF]">
-                    {companyUsers.length === 0 ? (
+                    {loadingCompanyUsers && companyUsers.length === 0 ? (
+                      <tr>
+                        <td colSpan={5} className="py-6 text-center text-[#7C8FAC]">
+                          Cargando colaboradores...
+                        </td>
+                      </tr>
+                    ) : companyUsers.length === 0 ? (
                       <tr>
                         <td colSpan={5} className="py-6 text-center text-[#7C8FAC]">
                           No hay colaboradores registrados. Haz clic en "Invitar Empleado" para agregar miembros al equipo.
@@ -1973,12 +2048,44 @@ export default function CorporatePortalPage() {
                       companyUsers.map((u) => {
                         const isSelf = u.email.toLowerCase() === user?.email?.toLowerCase();
                         const isUpdating = updatingUserId === u.uid;
+                        // «s/d» es la respuesta cuando el listado no publica el dato
+                        // (`CF-101`): no se inventa un rol, un estado ni un nombre.
+                        const roleLabel =
+                          u.companyRole === "company_admin"
+                            ? "Administrador de Empresa"
+                            : u.companyRole === "operador"
+                            ? "Operador de Traslados"
+                            : "s/d";
+                        const roleClass =
+                          u.companyRole === "company_admin"
+                            ? "bg-[#EDE9FE] text-[#6D28D9]"
+                            : u.companyRole === "operador"
+                            ? "bg-[#E0F2FE] text-[#0369A1]"
+                            : "bg-[#F2F6FA] text-[#5A6A85]";
+                        const statusLabel =
+                          u.isActive === true
+                            ? "Activo"
+                            : u.isActive === false
+                            ? "Inactivo"
+                            : "s/d";
+                        const statusClass =
+                          u.isActive === true
+                            ? "bg-[#E6FFFA] text-[#0D9488]"
+                            : u.isActive === false
+                            ? "bg-[#FDEDE8] text-[#FA896B]"
+                            : "bg-[#F2F6FA] text-[#5A6A85]";
+                        const statusDotClass =
+                          u.isActive === true
+                            ? "bg-[#0D9488]"
+                            : u.isActive === false
+                            ? "bg-[#FA896B]"
+                            : "bg-[#5A6A85]";
                         return (
                           <tr key={u.uid} className="hover:bg-[#F8FAFD] transition">
                             <td className="py-3 px-3 font-semibold text-[#2A3547]">
                               {u.firstName || u.lastName
                                 ? `${u.firstName || ""} ${u.lastName || ""}`.trim()
-                                : "Colaborador"}
+                                : "s/d"}
                               {isSelf && (
                                 <span className="ml-2 text-[10px] font-bold bg-[#ECF2FF] text-[#5D87FF] px-1.5 py-0.5 rounded">
                                   Tú
@@ -1990,32 +2097,20 @@ export default function CorporatePortalPage() {
                             </td>
                             <td className="py-3 px-3">
                               <span
-                                className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold ${
-                                  u.companyRole === "company_admin"
-                                    ? "bg-[#EDE9FE] text-[#6D28D9]"
-                                    : "bg-[#E0F2FE] text-[#0369A1]"
-                                }`}
+                                className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold ${roleClass}`}
                               >
                                 <Shield className="w-3 h-3" />
-                                {u.companyRole === "company_admin"
-                                  ? "Administrador de Empresa"
-                                  : "Operador de Traslados"}
+                                {roleLabel}
                               </span>
                             </td>
                             <td className="py-3 px-3">
                               <span
-                                className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold ${
-                                  u.isActive
-                                    ? "bg-[#E6FFFA] text-[#0D9488]"
-                                    : "bg-[#FDEDE8] text-[#FA896B]"
-                                }`}
+                                className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold ${statusClass}`}
                               >
                                 <span
-                                  className={`w-1.5 h-1.5 rounded-full ${
-                                    u.isActive ? "bg-[#0D9488]" : "bg-[#FA896B]"
-                                  }`}
+                                  className={`w-1.5 h-1.5 rounded-full ${statusDotClass}`}
                                 />
-                                {u.isActive ? "Activo" : "Inactivo"}
+                                {statusLabel}
                               </span>
                             </td>
                             <td className="py-3 px-3 text-right">
@@ -2051,6 +2146,21 @@ export default function CorporatePortalPage() {
                                       {u.isActive ? "Desactivar" : "Reactivar"}
                                     </button>
                                   </>
+                                )}
+                                {/* S8: la baja es del administrador de la empresa. El
+                                    último administrador activo no se puede retirar, y
+                                    ese rechazo lo dice el backend, con el nombre de la
+                                    empresa. */}
+                                {isCompanyAdmin && (
+                                  <button
+                                    type="button"
+                                    disabled={isUpdating}
+                                    onClick={() => handleDeleteUser(u)}
+                                    className="px-2 py-1 text-[11px] font-bold rounded cursor-pointer transition disabled:opacity-50 border border-[#FA896B] text-[#FA896B] hover:bg-[#FDEDE8]"
+                                    title="Eliminar al colaborador de la empresa (su cuenta de acceso queda deshabilitada)"
+                                  >
+                                    Eliminar
+                                  </button>
                                 )}
                               </div>
                             </td>
@@ -2857,7 +2967,9 @@ export default function CorporatePortalPage() {
       )}
 
       {/* Modal: Invitar Colaborador / Empleado Corporativo (CF-39) */}
-      {showInviteUserModal && (
+      {/* Fuera de la tarjeta del equipo, que ya es de administración: el modal
+          exige el mismo permiso que el botón que lo abre (S1). */}
+      {isCompanyAdmin && showInviteUserModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-xs p-4">
           <div className="bg-white rounded-xl shadow-2xl border border-[#E5EAEF] max-w-md w-full p-6 space-y-4">
             <div className="flex items-center justify-between border-b border-[#E5EAEF] pb-3">

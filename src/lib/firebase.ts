@@ -582,13 +582,83 @@ export const updateCompanyUserCallable = (data: UpdateCompanyUserParams) =>
     "updateCompanyUser"
   )(data);
 
+// --- CF-101: el CRUD de los usuarios de una empresa lo gobierna su administrador ---
+/**
+ * Un colaborador tal como lo publica `listCompanyUsers`: la lista blanca de siete
+ * campos del contrato. No llega el documento entero —ni el saldo, ni las tarifas
+ * negociadas, ni el teléfono, ni el país de operación, ni el rol de plataforma—.
+ *
+ * Un opcional que el documento no declara con el tipo esperado **no viaja**, así
+ * que su ausencia no se puede confundir con un valor: la tabla dice «s/d» en vez
+ * de rellenarlo por su cuenta.
+ */
+export interface CompanyUserView {
+  uid: string;
+  email: string;
+  firstName?: string;
+  lastName?: string;
+  /**
+   * El rol de EMPRESA tal como está en el documento. El contrato lo publica como
+   * texto: un valor fuera de `company_admin` / `operador` es un dato que el portal
+   * no conoce y no debe presentar como si lo conociera.
+   */
+  companyRole?: string;
+  isActive?: boolean;
+  createdAt?: string;
+}
+
+export interface ListCompanyUsersResponse {
+  users: CompanyUserView[];
+  /** Cuántas filas viajan; es `users.length`. */
+  count: number;
+}
+
+/**
+ * El personal de la empresa del llamador. El payload acepta **sólo** `limit`
+ * (1 a 100; ausente vale 100): la empresa sale del claim, nunca del cuerpo.
+ */
+export const listCompanyUsersCallable = (params?: { limit?: number }) =>
+  httpsCallable<{ limit?: number }, ListCompanyUsersResponse>(
+    functions,
+    "listCompanyUsers"
+  )(params || {});
+
+export interface DeleteCompanyUserResponse {
+  /** El uid retirado. */
+  uid: string;
+  /** El correo de la cuenta, para el registro de la baja. */
+  email: string;
+  /** El instante de la baja, en ISO 8601. */
+  deletedAt: string;
+}
+
+/**
+ * Retira a un colaborador de la empresa. La baja es REVERSIBLE (S8): el backend
+ * deshabilita la cuenta de Auth y limpia sus claims antes de borrar
+ * `users/{uid}`, y la cuenta de Auth no se borra.
+ *
+ * El uid viaja como `userId`, que es el nombre que acepta el callable.
+ */
+export const deleteCompanyUserCallable = (data: { userId: string }) =>
+  httpsCallable<{ userId: string }, DeleteCompanyUserResponse>(
+    functions,
+    "deleteCompanyUser"
+  )(data);
+
+/**
+ * La fila que pinta la tabla del equipo.
+ *
+ * `companyRole` e `isActive` son opcionales a propósito: `listCompanyUsers` no
+ * los publica cuando el documento no los declara con el tipo esperado, y la
+ * celda muestra «s/d» en vez de un rol o un estado inventados.
+ */
 export interface CompanyUserRow {
   uid: string;
   email: string;
   firstName?: string;
   lastName?: string;
-  companyRole: "company_admin" | "operador";
-  isActive: boolean;
+  companyRole?: "company_admin" | "operador";
+  isActive?: boolean;
   createdAt?: string;
 }
 
