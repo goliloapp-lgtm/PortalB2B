@@ -620,3 +620,35 @@ export async function resolveCompanyRoleId(
 
 
 
+
+// --- CF-100: la empresa del usuario, resuelta por el id del token ---
+/**
+ * Lo que devuelve `getMyCompany`: el perfil de la empresa, sin dinero.
+ *
+ * `companyId` y `countryId` vienen siempre; el resto es opcional y se omite cuando
+ * el documento no lo trae. El `countryId` es el del DOCUMENTO de la empresa, no el
+ * del perfil del empleado: con él se arma la ruta de la suscripción.
+ */
+export interface MyCompanyResponse {
+  companyId: string;
+  countryId: string;
+  tradeName?: string;
+  legalName?: string;
+  name?: string;
+  nit?: string;
+  status?: string;
+  contactName?: string;
+  contactPhone?: string;
+  phone?: string;
+  billingPeriod?: string;
+  paymentCondition?: string;
+  allowsImmediateTrips?: boolean;
+  allowsScheduledTrips?: boolean;
+  minimumBookingLeadMinutes?: number;
+}
+
+export const getMyCompanyCallable = () =>
+  httpsCallable<Record<string, never>, MyCompanyResponse>(
+    functions,
+    "getMyCompany"
+  )({});

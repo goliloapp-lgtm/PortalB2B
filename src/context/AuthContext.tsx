@@ -16,7 +16,7 @@ import {
   updateDoc,
   serverTimestamp,
 } from "firebase/firestore";
-import { auth, db, functions } from "@/lib/firebase";
+import { auth, db, functions, getMyCompanyCallable } from "@/lib/firebase";
 import { httpsCallable } from "firebase/functions";
 import { B2BCompany } from "@/types/b2b";
 
@@ -120,17 +120,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
         }
         setCompanyRole(resolvedRole);
 
-        const claimCountryIds = Array.isArray(tokenResult?.claims?.countryIds)
-          ? (tokenResult!.claims.countryIds as string[])
-          : [];
-        const targetCountryId =
-          claimCountryIds.length > 0 && typeof claimCountryIds[0] === "string"
-            ? claimCountryIds[0].trim().toLowerCase()
-            : typeof userData?.countryId === "string" &&
-                userData.countryId.trim() !== ""
-              ? userData.countryId.trim().toLowerCase()
-              : "sv";
-
+        // CF-100 — el país NO se toma del perfil. `users/{uid}.countryId` es un dato
+        // derivado de la empresa y escribible: armar con él la ruta dejaba la empresa
+        // sin encontrar cuando se desalineaba (caso medido: `"ve"` con la empresa en
+        // `sv`) y bloqueaba la invitación de empleados. El país lo deriva el backend
+        // del documento de la empresa.
         const docCompanyId =
           typeof userData?.companyId === "string" &&
           userData.companyId.trim() !== ""
@@ -149,11 +143,70 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
             setLoading(false);
           }, 1500);
 
+          const resolved = await withTimeout(
+            getMyCompanyCallable(),
+            8000
+          ).catch((err: unknown) => {
+            console.warn(
+              "[Portal Auth] getMyCompany falló:",
+              err instanceof Error ? err.message : err
+            );
+            return null;
+          });
+
+          const profile = resolved?.data;
+          const resolvedCountryId =
+            typeof profile?.countryId === "string" &&
+            profile.countryId.trim() !== ""
+              ? profile.countryId.trim()
+              : "";
+
+          // Resiliencia de despliegue: si las functions todavía no tienen
+          // `getMyCompany`, el portal conserva el camino anterior en vez de quedarse
+          // sin empresa. Es el ÚNICO lugar que sigue usando el país del perfil, y sólo
+          // cuando el backend no respondió: queda en el log.
+          const claimCountryIds = Array.isArray(tokenResult?.claims?.countryIds)
+            ? (tokenResult!.claims.countryIds as string[])
+            : [];
+          const fallbackCountryId =
+            claimCountryIds.length > 0 && typeof claimCountryIds[0] === "string"
+              ? claimCountryIds[0].trim().toLowerCase()
+              : typeof userData?.countryId === "string" &&
+                  userData.countryId.trim() !== ""
+                ? userData.countryId.trim().toLowerCase()
+                : "sv";
+          const subscriptionCountryId =
+            resolvedCountryId !== "" ? resolvedCountryId : fallbackCountryId;
+          if (resolvedCountryId === "") {
+            console.warn(
+              "[Portal Auth] getMyCompany no devolvió país; se conserva el camino anterior (país del perfil)."
+            );
+          }
+
+          // La empresa ya se puede mostrar sin esperar la suscripción: el perfil sale
+          // de la respuesta del backend, no de la ruta adivinada.
+          if (profile) {
+          setCompany({
+            id: profile.companyId,
+            ...profile,
+            tradeName:
+              profile.tradeName ||
+              profile.name ||
+              profile.legalName ||
+              "Empresa Corporativa",
+            // El perfil no trae dinero: `balance` lo pone la suscripción, si llega.
+            balance: 0,
+            // `B2BCompany` del portal exige campos que el backend no publica (el
+            // perfil es una lista blanca): el casteo es explícito y lo que falta lo
+            // completa la suscripción cuando el documento es legible.
+          } as unknown as B2BCompany);
+          }
+
           unsubscribeCompany = onSnapshot(
             doc(
               db,
               "countries",
-              targetCountryId,
+              subscriptionCountryId,
               "b2bCompanies",
               targetCompanyId
             ),
@@ -178,7 +231,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
             (err) => {
               clearTimeout(snapTimer);
               console.warn(
-                `[Portal Auth] No se pudo suscribir a countries/${targetCountryId}/b2bCompanies/${targetCompanyId}:`,
+                `[Portal Auth] No se pudo suscribir a countries/${subscriptionCountryId}/b2bCompanies/${targetCompanyId}:`,
                 err?.message || err
               );
               setLoading(false);
