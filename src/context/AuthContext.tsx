@@ -143,13 +143,23 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
             setLoading(false);
           }, 1500);
 
+          // Una DENEGACIÓN no se saltea. La salida de emergencia de abajo existe
+          // sólo para el caso «la función todavía no está desplegada»; si el backend
+          // rechaza por autorización (p. ej. la cuenta es de un conductor, o el rol
+          // no es de empresa), el portal no debe volver al camino viejo: quedarse
+          // sin empresa es la respuesta correcta.
+          const callableFailure = { code: "" as string };
           const resolved = await withTimeout(
             getMyCompanyCallable(),
             8000
           ).catch((err: unknown) => {
+            callableFailure.code =
+              typeof (err as { code?: unknown })?.code === "string"
+                ? String((err as { code?: string }).code)
+                : "";
             console.warn(
               "[Portal Auth] getMyCompany falló:",
-              err instanceof Error ? err.message : err
+              callableFailure.code || (err instanceof Error ? err.message : err)
             );
             return null;
           });
@@ -175,12 +185,32 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
                   userData.countryId.trim() !== ""
                 ? userData.countryId.trim().toLowerCase()
                 : "sv";
+          // Sólo estos códigos significan «la función no está»: cualquier otro es una
+          // respuesta del backend —una denegación incluida— y no se rodea.
+          const functionMissing = [
+            "functions/not-found",
+            "functions/internal",
+            "functions/unavailable",
+          ].includes(callableFailure.code);
+
           const subscriptionCountryId =
-            resolvedCountryId !== "" ? resolvedCountryId : fallbackCountryId;
-          if (resolvedCountryId === "") {
+            resolvedCountryId !== ""
+              ? resolvedCountryId
+              : functionMissing
+                ? fallbackCountryId
+                : "";
+          if (resolvedCountryId === "" && functionMissing) {
             console.warn(
-              "[Portal Auth] getMyCompany no devolvió país; se conserva el camino anterior (país del perfil)."
+              "[Portal Auth] getMyCompany no está desplegada; se conserva el camino anterior (país del perfil)."
             );
+          }
+          if (subscriptionCountryId === "") {
+            // Denegación o respuesta sin país: no se arma ninguna ruta y el portal
+            // queda sin empresa, que es lo que corresponde.
+            clearTimeout(snapTimer);
+            setCompany(null);
+            setLoading(false);
+            return;
           }
 
           // La empresa ya se puede mostrar sin esperar la suscripción: el perfil sale
