@@ -73,19 +73,19 @@ const getMinReservationDateTime = (hours = B2B_RESERVATION_CONFIG.minAdvanceHour
 // `budgetLimit` (CONTRATO_FRONTEND.md, CF-23 y los centros de costo de `createScheduledTrip`).
 // `monthlyBudget` es un campo legado y NO es el techo: si falta `budgetLimit` el centro está
 // «sin límite definido», y no se inventa un número con el que compararlo.
-const formatCostCentreCeiling = (cc: CostCenter): string => {
+const describeCostCentreBalance = (cc: CostCenter): string => {
   const used = Number(cc.spent || 0) + Number(cc.reserved || 0);
-  const limit =
-    typeof cc.budgetLimit === "number" ? cc.budgetLimit : null;
+  const limit = typeof cc.budgetLimit === "number" ? cc.budgetLimit : null;
   const money = (value: number): string =>
     `${value < 0 ? "-" : ""}$${Math.abs(value).toFixed(2)}`;
-  const usedText = ` · Consumido + reservado ${money(used)}`;
-  if (limit === null) return ` · sin límite definido${usedText}`;
-  // LO QUE QUEDA, A LA VISTA EN LA SOLICITUD. Con más de un centro de costo el
-  // operador tiene que poder elegir sabiendo cuánto le resta en cada uno; antes
-  // ese número sólo aparecía cuando el backend ya había rechazado la reserva.
-  return ` · Techo ${money(limit)}${usedText} · Disponible ${money(limit - used)}`;
+  const usedText = `Consumido + reservado ${money(used)}`;
+  return limit === null
+    ? `Sin límite definido · ${usedText}`
+    : `Techo ${money(limit)} · ${usedText} · Disponible ${money(limit - used)}`;
 };
+
+const formatCostCentreCeiling = (cc: CostCenter): string =>
+  ` · ${describeCostCentreBalance(cc)}`;
 
 // F6: el selector no elige solo. Se conserva la elección previa mientras siga siendo
 // válida y solo se autoselecciona cuando la empresa tiene exactamente un centro: con
@@ -637,6 +637,20 @@ export default function NuevaSolicitudPortalB2BPage() {
   const effectiveTaxLabel = serverQuote?.taxLabel ?? tariff.taxLabel;
   const effectiveTaxAmount = serverQuote?.taxAmount ?? tariff.taxAmount;
   const effectiveTotalAmount = serverQuote?.totalAmount ?? tariff.totalAmount;
+
+  // EL AVISO SE ADELANTA AL RECHAZO. El backend reserva contra el techo por
+  // `quote.totalAmount` (`createScheduledTrip.ts`, §5.13.5-ter), así que acá se compara
+  // exactamente ese número: si la reserva supera lo disponible, se ve antes de enviar.
+  const chosenCostCentre =
+    costCenters.find((cc) => cc.id === costCenterId) ?? null;
+  const chosenAvailable =
+    chosenCostCentre && typeof chosenCostCentre.budgetLimit === "number"
+      ? chosenCostCentre.budgetLimit -
+        (Number(chosenCostCentre.spent || 0) +
+          Number(chosenCostCentre.reserved || 0))
+      : null;
+  const exceedsAvailable =
+    chosenAvailable !== null && effectiveTotalAmount > chosenAvailable;
   const effectiveRateSourceLabel =
     serverQuote?.rateSource === "negotiated"
       ? "Tarifa negociada"
@@ -1402,6 +1416,22 @@ export default function NuevaSolicitudPortalB2BPage() {
                       </>
                     )}
                   </select>
+                  {chosenCostCentre && (
+                    <p
+                      className={`mt-1 text-[11px] ${
+                        exceedsAvailable
+                          ? "font-semibold text-[#C62828]"
+                          : "text-[#7C8FAC]"
+                      }`}
+                    >
+                      {describeCostCentreBalance(chosenCostCentre)}
+                      {exceedsAvailable
+                        ? ` — la reserva ($${effectiveTotalAmount.toFixed(
+                            2
+                          )}) supera lo disponible`
+                        : ""}
+                    </p>
+                  )}
                 </div>
 
                 <div>
