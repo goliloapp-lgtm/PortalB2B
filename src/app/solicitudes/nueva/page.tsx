@@ -77,10 +77,14 @@ const formatCostCentreCeiling = (cc: CostCenter): string => {
   const used = Number(cc.spent || 0) + Number(cc.reserved || 0);
   const limit =
     typeof cc.budgetLimit === "number" ? cc.budgetLimit : null;
-  const usedText = ` · Consumido + reservado $${used.toFixed(2)}`;
-  return limit === null
-    ? ` · sin límite definido${usedText}`
-    : ` · Techo $${limit.toFixed(2)}${usedText}`;
+  const money = (value: number): string =>
+    `${value < 0 ? "-" : ""}$${Math.abs(value).toFixed(2)}`;
+  const usedText = ` · Consumido + reservado ${money(used)}`;
+  if (limit === null) return ` · sin límite definido${usedText}`;
+  // LO QUE QUEDA, A LA VISTA EN LA SOLICITUD. Con más de un centro de costo el
+  // operador tiene que poder elegir sabiendo cuánto le resta en cada uno; antes
+  // ese número sólo aparecía cuando el backend ya había rechazado la reserva.
+  return ` · Techo ${money(limit)}${usedText} · Disponible ${money(limit - used)}`;
 };
 
 // F6: el selector no elige solo. Se conserva la elección previa mientras siga siendo
@@ -1392,7 +1396,7 @@ export default function NuevaSolicitudPortalB2BPage() {
                           <option key={cc.id} value={cc.id}>
                             {cc.code ? `${cc.code} — ` : ""}
                             {cc.name}
-                            {isCompanyAdmin ? formatCostCentreCeiling(cc) : ""}
+                            {formatCostCentreCeiling(cc)}
                           </option>
                         ))}
                       </>
