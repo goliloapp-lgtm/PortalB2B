@@ -1432,6 +1432,47 @@ export default function NuevaSolicitudPortalB2BPage() {
                         : ""}
                     </p>
                   )}
+                  {(() => {
+                    const selectedCC = chosenCostCentre;
+                    if (!selectedCC) return null;
+                    const hasLimit =
+                      typeof selectedCC.budgetLimit === "number" &&
+                      Number.isFinite(selectedCC.budgetLimit);
+                    const spent = Number(selectedCC.spent || 0);
+                    const reserved = Number(selectedCC.reserved || 0);
+                    const available = hasLimit
+                      ? Number(selectedCC.budgetLimit) - spent - reserved
+                      : null;
+                    const isLow = hasLimit && (available ?? 0) <= 0;
+                    return (
+                      <div
+                        className={`mt-1.5 px-3 py-2 rounded-[6px] border text-[11px] leading-snug ${
+                          isLow || exceedsAvailable
+                            ? "bg-[#FEF3F2] border-[#FECDCA] text-[#B42318]"
+                            : "bg-[#ECF2FF] border-[#D8E5FF] text-[#2A3547]"
+                        }`}
+                      >
+                        <span className="font-bold">
+                          Saldo disponible ({selectedCC.name}):{" "}
+                          {hasLimit
+                            ? `$${(available ?? 0).toFixed(2)} USD`
+                            : "Sin límite definido"}
+                        </span>
+                        {" · "}
+                        <span>
+                          {hasLimit
+                            ? `Techo: $${Number(selectedCC.budgetLimit).toFixed(2)}`
+                            : "Techo: SIN LÍMITE"}
+                          {` · Consumido: $${spent.toFixed(2)} · Reservado: $${reserved.toFixed(2)}`}
+                        </span>
+                        {exceedsAvailable && (
+                          <div className="font-bold text-[#C62828] mt-1">
+                            Atención: Esta reserva estimada (${effectiveTotalAmount.toFixed(2)}) supera el saldo disponible.
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
                 </div>
 
                 <div>

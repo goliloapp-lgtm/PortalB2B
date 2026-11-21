@@ -17,7 +17,6 @@ import {
   getCompanyPeriodSummaryCallable,
   GetCompanyPeriodSummaryResponse,
   listCostCentresCallable,
-  updateCostCentreCallable,
   listTravellersCallable,
   createTravellerCallable,
   updateTravellerCallable,
@@ -269,10 +268,6 @@ export default function CorporatePortalPage() {
   const [searchTerm, setSearchTerm] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [costCenters, setCostCenters] = useState<CostCenter[]>([]);
-  const [editingLimitMap, setEditingLimitMap] = useState<Record<string, string>>(
-    {}
-  );
-  const [savingLimitId, setSavingLimitId] = useState<string | null>(null);
   const [loadingRequests, setLoadingRequests] = useState(true);
   const [selectedRequest, setSelectedRequest] =
     useState<PortalRequest | null>(null);
@@ -1043,39 +1038,6 @@ export default function CorporatePortalPage() {
     user,
   ]);
 
-  const handleSaveCostCenterCeiling = async (
-    cc: CostCenter,
-    newLimit: number | null
-  ) => {
-    if (!company?.id || !isCompanyAdmin) return;
-    setSavingLimitId(cc.id);
-    try {
-      // CF-46: company_admin solo puede mover budgetLimit vía updateCostCentreCallable (entero > 0 o null)
-      const normalizedLimit =
-        newLimit === null ? null : Math.max(1, Math.round(newLimit));
-      await updateCostCentreCallable({
-        costCentreId: cc.id,
-        budgetLimit: normalizedLimit,
-      });
-      toast.success(
-        normalizedLimit === null
-          ? "Se eliminó el límite de presupuesto (Sin límite)."
-          : `Límite de presupuesto actualizado a $${normalizedLimit.toFixed(2)} USD.`
-      );
-      await reloadAdminData();
-    } catch (err: any) {
-      console.error("Error actualizando techo de consumo:", err);
-      toast.error(
-        formatFriendlyError(
-          err,
-          "No pudimos actualizar el límite de presupuesto en este momento."
-        )
-      );
-    } finally {
-      setSavingLimitId(null);
-    }
-  };
-
   const handleRequestNewCostCentre = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!proposedCCName.trim()) {
@@ -1704,10 +1666,10 @@ export default function CorporatePortalPage() {
             <div className="flex items-center justify-between mb-4 pb-3 border-b border-[#E5EAEF]">
               <div>
                 <h2 className="text-base font-bold text-[#2A3547]">
-                  Centros de Costo y Techo de Consumo
+                  Centros de Costo y Límite de Consumo
                 </h2>
                 <p className="text-xs text-[#7C8FAC]">
-                  Configura el límite presupuestario mensual por departamento o déjalo en blanco para operar SIN LÍMITE
+                  Consulta el límite presupuestario y el saldo disponible por centro de costo. Para modificar un límite, contacta a Lilo.
                 </p>
               </div>
               <div className="flex items-center space-x-2">
@@ -1728,12 +1690,15 @@ export default function CorporatePortalPage() {
               {costCenters.map((cc) => {
                 // F6: el techo es `budgetLimit` y nada más. `monthlyBudget` es un campo
                 // legado; usarlo como respaldo mostraba un techo que el backend no aplica.
-                const limitVal = cc.budgetLimit ?? null;
-                const isUnlimited = limitVal === null || limitVal === undefined;
-                const used = Number(cc.spent || 0) + Number(cc.reserved || 0);
-                const draftVal =
-                  editingLimitMap[cc.id] ??
-                  (isUnlimited ? "" : String(limitVal));
+                const limitVal =
+                  typeof cc.budgetLimit === "number" && Number.isFinite(cc.budgetLimit)
+                    ? cc.budgetLimit
+                    : null;
+                const isUnlimited = limitVal === null;
+                const spent = Number(cc.spent || 0);
+                const reserved = Number(cc.reserved || 0);
+                const used = spent + reserved;
+                const available = isUnlimited ? null : Number(limitVal) - used;
 
                 return (
                   <div
@@ -1765,51 +1730,25 @@ export default function CorporatePortalPage() {
                       </span>
                     </div>
 
-                    <div className="flex items-center space-x-1.5 pt-1">
-                      <input
-                        type="number"
-                        min={0}
-                        step="0.01"
-                        placeholder="Vacío = SIN LÍMITE"
-                        value={draftVal}
-                        onChange={(e) =>
-                          setEditingLimitMap((prev) => ({
-                            ...prev,
-                            [cc.id]: e.target.value,
-                          }))
-                        }
-                        className="w-full border border-[#DFE5EF] rounded px-2 py-1.5 bg-white text-xs"
-                      />
-                      <button
-                        type="button"
-                        disabled={savingLimitId === cc.id}
-                        onClick={() => {
-                          const raw = draftVal.trim();
-                          const parsed =
-                            raw === "" ? null : Math.max(0, Number(raw));
-                          handleSaveCostCenterCeiling(cc, parsed);
-                        }}
-                        className="px-2.5 py-1.5 bg-[#5D87FF] text-white rounded font-semibold shrink-0 cursor-pointer"
+                    <div className="text-[#5A6A85] flex justify-between">
+                      <span>Saldo Disponible:</span>
+                      <span
+                        className={`font-bold ${
+                          isUnlimited
+                            ? "text-[#0D9488]"
+                            : (available ?? 0) <= 0
+                            ? "text-[#FA896B]"
+                            : "text-[#13DEB9]"
+                        }`}
                       >
-                        Guardar
-                      </button>
-                      {!isUnlimited && (
-                        <button
-                          type="button"
-                          disabled={savingLimitId === cc.id}
-                          onClick={() => {
-                            setEditingLimitMap((prev) => ({
-                              ...prev,
-                              [cc.id]: "",
-                            }));
-                            handleSaveCostCenterCeiling(cc, null);
-                          }}
-                          className="px-2 py-1.5 bg-[#E6FFFA] text-[#0D9488] rounded font-semibold shrink-0 cursor-pointer"
-                          title="Dejar SIN LÍMITE"
-                        >
-                          ∞
-                        </button>
-                      )}
+                        {isUnlimited
+                          ? "SIN LÍMITE"
+                          : `$${(available ?? 0).toFixed(2)} USD`}
+                      </span>
+                    </div>
+
+                    <div className="pt-1.5 border-t border-[#E5EAEF] text-[11px] text-[#7C8FAC]">
+                      Para aumentar o disminuir este límite, contacta a Lilo.
                     </div>
                   </div>
                 );
